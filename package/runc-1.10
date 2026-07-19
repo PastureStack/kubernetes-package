@@ -10,7 +10,11 @@ while [ "$#" -gt 0 ]; do
     fi
 done
 
-export DOCKER_API_VERSION=1.22
+if [ -n "${PASTURESTACK_DOCKER_API_VERSION:-}" ]; then
+    export DOCKER_API_VERSION="${PASTURESTACK_DOCKER_API_VERSION}"
+elif [ -z "${DOCKER_API_VERSION:-}" ]; then
+    unset DOCKER_API_VERSION
+fi
 PID=$(docker inspect -f '{{.State.Pid}}' $1)
 
 shift 1

@@ -3,6 +3,9 @@ set -x
 
 function semver_lt() { test "$(printf '%s\n' "$@" | sort -r -V | head -n 1)" != "$1"; }
 
+SYSTEM_SERVICE_ACCOUNT=${SYSTEM_SERVICE_ACCOUNT:-pasturestack-system}
+DNS_APP_LABEL_KEY=${DNS_APP_LABEL_KEY:-pasturestack-app}
+
 if [ ${DISABLE_ADDONS} == "true" ]; then
     echo "addons have been disabled"
     sleep infinity
@@ -22,7 +25,7 @@ cat <<EOF | kubectl apply -f - || true
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: "io-rancher-system"
+  name: "${SYSTEM_SERVICE_ACCOUNT}"
   namespace: "kube-system"
 
 ---
@@ -33,7 +36,7 @@ metadata:
   name: addons-binding
 subjects:
 - kind: ServiceAccount
-  name: io-rancher-system
+  name: "${SYSTEM_SERVICE_ACCOUNT}"
   namespace: kube-system
 roleRef:
   kind: ClusterRole
@@ -55,7 +58,7 @@ DOCKER_IO_REGISTRY=${REGISTRY:-docker.io}
 INFLUXDB_RETENTION=${INFLUXDB_RETENTION:-0s}
 DNS_REPLICAS=${DNS_REPLICAS:-1}
 DNS_CLUSTER_IP=${DNS_CLUSTER_IP:-10.43.0.10}
-BASE_IMAGE_NAMESPACE=${BASE_IMAGE_NAMESPACE:-rancher}
+BASE_IMAGE_NAMESPACE=${BASE_IMAGE_NAMESPACE:-pasturestack}
 ADDONS_LOG_VERBOSITY_LEVEL=${ADDONS_LOG_VERBOSITY_LEVEL:-2}
 DASHBOARD_CPU_LIMIT=${DASHBOARD_CPU_LIMIT:-100m}
 DASHBOARD_MEMORY_LIMIT=${DASHBOARD_MEMORY_LIMIT:-300Mi}
@@ -99,6 +102,8 @@ for f in $(find $ADDONS_DIR -name '*.yaml'); do
   sed -i "s|\$HEAPSTER_IMAGE|$HEAPSTER_IMAGE|g" ${f}
   sed -i "s|\$INFLUXDB_IMAGE|$INFLUXDB_IMAGE|g" ${f}
   sed -i "s|\$TILLER_IMAGE|$TILLER_IMAGE|g" ${f}
+  sed -i "s|\$SYSTEM_SERVICE_ACCOUNT|$SYSTEM_SERVICE_ACCOUNT|g" ${f}
+  sed -i "s|\$DNS_APP_LABEL_KEY|$DNS_APP_LABEL_KEY|g" ${f}
   sed -i "s|\$DASHBOARD_CPU_LIMIT|$DASHBOARD_CPU_LIMIT|g" ${f}
   sed -i "s|\$DASHBOARD_MEMORY_LIMIT|$DASHBOARD_MEMORY_LIMIT|g" ${f}
 done

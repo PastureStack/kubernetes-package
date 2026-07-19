@@ -9,26 +9,81 @@ SUFFIX=""
 
 cd $(dirname $0)/../package
 
+KUBERNETES_SOURCE_COMMIT=71fde6aadce8b92456b88ee56c21e500f4919f0b
+KUBERNETES_SOURCE_DATE_EPOCH=1567540757
+KUBERNETES_BINARY_VERSION=${KUBERNETES_BINARY_VERSION:-v1.12.10-pasturestack.1}
+KUBERNETES_SERVER_SHA256=f3df06f9bf2e4c4e8b5aba16d44197e26672aa06e8c24ab9f6ab4eaf64ab068e
+KUBERNETES_PATCH=../patches/kubernetes-v1.12.10-docker29-cgroupv2.patch
+KUBERNETES_BUILD_ROOT=$(mktemp -d /tmp/pasturestack-kubernetes-build.XXXXXX)
+
+cleanup() {
+    rm -f kubectl kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler \
+        LICENSE SECURITY.md ORIGIN.md COMPATIBILITY.md
+    if [ -n "${KUBERNETES_BUILD_ROOT:-}" ]; then
+        rm -rf "${KUBERNETES_BUILD_ROOT}"
+    fi
+}
+trap cleanup EXIT
+
 TAG=${TAG:-${VERSION}${SUFFIX}}
-REPO=${REPO:-rancher}
+REPO=${REPO:-pasturestack}
+IMAGE_NAME=${IMAGE_NAME:-}
+IMAGE=${IMAGE:-}
 
 if echo $TAG | grep -q dirty; then
     TAG=dev
 fi
 
+echo "${KUBERNETES_SERVER_SHA256}  ${DOWNLOAD}/k8s.tar.gz" | sha256sum -c -
 tar xvzf $DOWNLOAD/k8s.tar.gz --strip-components=3 kubernetes/server/bin/{kubelet,kube-proxy,kube-apiserver,kube-controller-manager,kube-scheduler,kubectl}
-tar xvzf $DOWNLOAD/k8s.tar.gz kubernetes/kubernetes-src.tar.gz
+tar xOzf $DOWNLOAD/k8s.tar.gz kubernetes/kubernetes-src.tar.gz > "${KUBERNETES_BUILD_ROOT}/kubernetes-src.tar.gz"
+mkdir -p "${KUBERNETES_BUILD_ROOT}/source"
+tar xzf "${KUBERNETES_BUILD_ROOT}/kubernetes-src.tar.gz" \
+    -C "${KUBERNETES_BUILD_ROOT}/source"
+
+(
+    cd "${KUBERNETES_BUILD_ROOT}/source"
+    patch --batch --forward -p1 < "${OLDPWD}/${KUBERNETES_PATCH}"
+    KUBERNETES_VERSION_FILE="${KUBERNETES_BUILD_ROOT}/version-vars"
+    cat > "${KUBERNETES_VERSION_FILE}" <<EOF
+KUBE_GIT_COMMIT='${KUBERNETES_SOURCE_COMMIT}'
+KUBE_GIT_TREE_STATE='clean'
+KUBE_GIT_VERSION='${KUBERNETES_BINARY_VERSION}'
+KUBE_GIT_MAJOR='1'
+KUBE_GIT_MINOR='12+'
+EOF
+    KUBE_GIT_VERSION_FILE="${KUBERNETES_VERSION_FILE}" \
+    SOURCE_DATE_EPOCH="${KUBERNETES_SOURCE_DATE_EPOCH}" \
+        make WHAT=cmd/kubelet
+    install -m 0755 _output/local/bin/linux/amd64/kubelet "${OLDPWD}/kubelet"
+)
+
+actual_kubelet_version=$(./kubelet --version)
+if [ "${actual_kubelet_version}" != "Kubernetes ${KUBERNETES_BINARY_VERSION}" ]; then
+    echo "unexpected kubelet version: ${actual_kubelet_version}" >&2
+    exit 1
+fi
+rm -rf "${KUBERNETES_BUILD_ROOT}"
+KUBERNETES_BUILD_ROOT=
 
 mkdir -p kubernetes/cluster/addons
 
 cp -r ../addon-templates/kubectl/* kubernetes/cluster/addons/
+cp ../LICENSE ../SECURITY.md ../ORIGIN.md ../COMPATIBILITY.md .
 
 for t in kubernetes/cluster/addons/dns/*.yaml.sed; do
     sed -f dns.sed <${t} >${t%.sed} && rm ${t}
     echo ${t%.sed}
 done
 
-IMAGE=${REPO}/k8s:${TAG}
-docker build -t ${IMAGE} .
-echo ${IMAGE} > ../dist/images
-echo Built ${IMAGE}
+if [ -z "${IMAGE}" ]; then
+    if [ -n "${IMAGE_NAME}" ]; then
+        IMAGE="${IMAGE_NAME}:${TAG}"
+    else
+        IMAGE="${REPO}/k8s:${TAG}"
+    fi
+fi
+
+docker build --build-arg "IMAGE_VERSION=${TAG}" -t "${IMAGE}" .
+echo "${IMAGE}" > ../dist/images
+echo Built "${IMAGE}"

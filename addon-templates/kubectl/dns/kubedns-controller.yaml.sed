@@ -39,7 +39,7 @@ spec:
     metadata:
       labels:
         k8s-app: kube-dns
-        rancher-app: kube-dns4
+        $DNS_APP_LABEL_KEY: kube-dns4
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
     spec:
@@ -56,7 +56,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
           - labelSelector:
               matchExpressions:
-              - key: rancher-app
+              - key: $DNS_APP_LABEL_KEY
                 operator: In
                 values:
                 - kube-dns4
@@ -182,4 +182,4 @@ spec:
             memory: 20Mi
             cpu: 10m
       dnsPolicy: Default  # Don't use cluster DNS.
-      serviceAccountName: io-rancher-system
+      serviceAccountName: $SYSTEM_SERVICE_ACCOUNT

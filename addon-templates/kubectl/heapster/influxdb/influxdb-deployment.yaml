@@ -17,7 +17,7 @@ spec:
         volumeMounts:
         - mountPath: /data
           name: influxdb-storage
-      serviceAccountName: io-rancher-system
+      serviceAccountName: $SYSTEM_SERVICE_ACCOUNT
       volumes:
       - name: influxdb-storage
         $INFLUXDB_VOLUME

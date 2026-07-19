@@ -1,32 +1,68 @@
-FROM ubuntu:16.04
-# FROM arm=armhf/ubuntu:16.04
+FROM ubuntu:26.04
 
-RUN apt-get update && \
-    apt-get install -y ca-certificates wget git xz-utils && \
-    rm -f /bin/sh && ln -s /bin/bash /bin/sh
+ARG DAPPER_HOST_ARCH=amd64
+ARG DOCKER_VERSION=29.5.3
+ARG KUBERNETES_VERSION=v1.12.10-rancher1
+ARG GO_VERSION=1.10.8
+ARG GO_LINUX_AMD64_SHA256=d8626fb6f9a3ab397d88c483b576be41fa81eefcec2fd18562c87626dbb3c39e
+ARG UBUNTU_MIRROR=http://archive.ubuntu.com/ubuntu
 
-ARG DAPPER_HOST_ARCH
-ENV HOST_ARCH=${DAPPER_HOST_ARCH} ARCH=${DAPPER_HOST_ARCH}
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HOST_ARCH=${DAPPER_HOST_ARCH} \
+    ARCH=${DAPPER_HOST_ARCH} \
+    DOWNLOAD=/usr/src \
+    KUBERNETES_DOWNLOAD=https://github.com/rancher/kubernetes/releases/download/${KUBERNETES_VERSION}/kubernetes-server-linux-amd64.tar.gz \
+    PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    SHELL=/bin/bash
 
+RUN set -eux; \
+    find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
+        -e "s|http://security.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" \
+        -e "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" {} +; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80pasturestack-retries; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        bash \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        make \
+        patch \
+        rsync \
+        tar \
+        xz-utils; \
+    curl -fsSLo /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
+    echo "${GO_LINUX_AMD64_SHA256}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    go version; \
+    rm -f /tmp/go.tgz; \
+    rm -rf /var/lib/apt/lists/*; \
+    rm -f /usr/bin/pebble; \
+    rm -f /bin/sh; \
+    ln -s /bin/bash /bin/sh
 
+RUN set -eux; \
+    case "${DAPPER_HOST_ARCH}" in \
+        amd64) docker_arch=x86_64 ;; \
+        arm64) docker_arch=aarch64 ;; \
+        *) echo "unsupported DAPPER_HOST_ARCH=${DAPPER_HOST_ARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 300 \
+        -o /tmp/docker.tgz "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
+    tar xzf /tmp/docker.tgz -C /usr/bin --strip-components=1 docker/docker; \
+    rm -f /tmp/docker.tgz; \
+    chmod +x /usr/bin/docker; \
+    mkdir -p "${DOWNLOAD}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 600 \
+        -o "${DOWNLOAD}/k8s.tar.gz" "${KUBERNETES_DOWNLOAD}"; \
+    docker --version
 
-ENV DOCKER_URL_amd64=https://get.docker.com/builds/Linux/x86_64/docker-1.10.3 \
-    DOCKER_URL_arm=https://github.com/rancher/docker/releases/download/v1.10.3-ros1/docker-1.10.3_arm \
-    DOCKER_URL=DOCKER_URL_${ARCH}
-RUN wget -O - ${!DOCKER_URL} > /usr/bin/docker && chmod +x /usr/bin/docker
-
-
-
-ENV DOWNLOAD /usr/src
-
-ENV KUBERNETES_DOWNLOAD https://github.com/rancher/kubernetes/releases/download/v1.12.7-rancher1/kubernetes-server-linux-amd64.tar.gz
-RUN wget -O - $KUBERNETES_DOWNLOAD > $DOWNLOAD/k8s.tar.gz
-
-ENV DAPPER_ENV REPO TAG
-ENV DAPPER_SOURCE /source
-ENV DAPPER_OUTPUT ./dist
-ENV DAPPER_DOCKER_SOCKET true
-ENV TRASH_CACHE ${DAPPER_SOURCE}/.trash-cache
+ENV DAPPER_ENV="REPO TAG IMAGE_NAME IMAGE KUBERNETES_BINARY_VERSION"
+ENV DAPPER_SOURCE=/source
+ENV DAPPER_OUTPUT=./dist
+ENV DAPPER_DOCKER_SOCKET=true
+ENV TRASH_CACHE=${DAPPER_SOURCE}/.trash-cache
 WORKDIR ${DAPPER_SOURCE}
 
 ENTRYPOINT ["./scripts/entry"]

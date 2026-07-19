@@ -1,0 +1,133 @@
+diff --git a/pkg/kubelet/cm/container_manager_linux.go b/pkg/kubelet/cm/container_manager_linux.go
+index 132e2de9ab..a966d50762 100644
+--- a/pkg/kubelet/cm/container_manager_linux.go
++++ b/pkg/kubelet/cm/container_manager_linux.go
+@@ -153,6 +153,14 @@ func validateSystemRequirements(mountUtil mount.Interface) (features, error) {
+ 		cpuMountPoint string
+ 		f             features
+ 	)
++	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
++		// The v1.12 container manager cannot create its historical per-QoS
++		// hierarchy on cgroup v2.  The compatibility profile disables that
++		// hierarchy and delegates container limits to the Docker runtime.
++		_, periodErr := os.Stat("/sys/fs/cgroup/cpu.max")
++		f.cpuHardcapping = periodErr == nil
++		return f, nil
++	}
+ 	mountPoints, err := mountUtil.List()
+ 	if err != nil {
+ 		return f, fmt.Errorf("%s - %v", localErr, err)
+diff --git a/pkg/kubelet/cm/helpers_linux.go b/pkg/kubelet/cm/helpers_linux.go
+index 64b1285497..b50e76b786 100644
+--- a/pkg/kubelet/cm/helpers_linux.go
++++ b/pkg/kubelet/cm/helpers_linux.go
+@@ -186,10 +186,21 @@ func GetCgroupSubsystems() (*CgroupSubsystems, error) {
+ 	// get all cgroup mounts.
+ 	allCgroups, err := libcontainercgroups.GetCgroupMounts(true)
+ 	if err != nil {
+-		return &CgroupSubsystems{}, err
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return &CgroupSubsystems{}, err
++		}
+ 	}
+ 	if len(allCgroups) == 0 {
+-		return &CgroupSubsystems{}, fmt.Errorf("failed to find cgroup mounts")
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return &CgroupSubsystems{}, fmt.Errorf("failed to find cgroup mounts")
++		}
++
++		subsystems := []string{"cpu", "cpuacct", "cpuset", "memory", "blkio", "devices"}
++		allCgroups = []libcontainercgroups.Mount{{
++			Mountpoint: "/sys/fs/cgroup",
++			Root:       "/",
++			Subsystems: subsystems,
++		}}
+ 	}
+ 	mountPoints := make(map[string]string, len(allCgroups))
+ 	for _, mount := range allCgroups {
+diff --git a/pkg/kubelet/dockershim/docker_sandbox.go b/pkg/kubelet/dockershim/docker_sandbox.go
+index b114bf052b..6bf3cb4cc1 100644
+--- a/pkg/kubelet/dockershim/docker_sandbox.go
++++ b/pkg/kubelet/dockershim/docker_sandbox.go
+@@ -546,6 +546,10 @@ func (ds *dockerService) applySandboxLinuxOptions(hc *dockercontainer.HostConfig
+ 	if lc == nil {
+ 		return nil
+ 	}
++	// Modern Docker daemons require an IPC namespace donor to be explicitly
++	// shareable. Workload containers join the pod sandbox's IPC namespace.
++	hc.IpcMode = dockercontainer.IpcMode("shareable")
++
+ 	// Apply security context.
+ 	if err := applySandboxSecurityContext(lc, createConfig.Config, hc, ds.network, separator); err != nil {
+ 		return err
+diff --git a/vendor/github.com/docker/docker/api/common.go b/vendor/github.com/docker/docker/api/common.go
+index 2879a110c1..d01d906303 100644
+--- a/vendor/github.com/docker/docker/api/common.go
++++ b/vendor/github.com/docker/docker/api/common.go
+@@ -3,7 +3,10 @@ package api
+ // Common constants for daemon and client.
+ const (
+ 	// DefaultVersion of Current REST API
+-	DefaultVersion = "1.38"
++	// Docker Engine 29 rejects clients older than API 1.40. Keep the oldest
++	// API accepted by that daemon so this legacy kubelet can still negotiate
++	// down when it connects to an older supported Engine.
++	DefaultVersion = "1.40"
+ 
+ 	// NoBaseImageSpecifier is the symbol used by the FROM
+ 	// command to specify that no base image is to be used.
+diff --git a/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go b/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go
+index d033f7bfc5..f8e808b2cf 100644
+--- a/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go
++++ b/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go
+@@ -16,6 +16,7 @@ package libcontainer
+ 
+ import (
+ 	"fmt"
++	"os"
+ 
+ 	info "github.com/google/cadvisor/info/v1"
+ 
+@@ -38,7 +39,20 @@ func GetCgroupSubsystems() (CgroupSubsystems, error) {
+ 	// Get all cgroup mounts.
+ 	allCgroups, err := cgroups.GetCgroupMounts(true)
+ 	if err != nil {
+-		return CgroupSubsystems{}, err
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return CgroupSubsystems{}, err
++		}
++	}
++	if len(allCgroups) == 0 {
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return CgroupSubsystems{}, fmt.Errorf("failed to find cgroup mounts")
++		}
++
++		allCgroups = []cgroups.Mount{{
++			Mountpoint: "/sys/fs/cgroup",
++			Root:       "/",
++			Subsystems: []string{"cpu", "cpuacct", "cpuset", "memory", "blkio", "devices"},
++		}}
+ 	}
+ 
+ 	return getCgroupSubsystemsHelper(allCgroups)
+diff --git a/vendor/github.com/google/cadvisor/manager/manager.go b/vendor/github.com/google/cadvisor/manager/manager.go
+index 0fb6d5dced..5afb79dfc8 100644
+--- a/vendor/github.com/google/cadvisor/manager/manager.go
++++ b/vendor/github.com/google/cadvisor/manager/manager.go
+@@ -150,7 +150,15 @@ func New(memoryCache *memory.InMemoryCache, sysfs sysfs.SysFs, maxHousekeepingIn
+ 	// Detect the container we are running on.
+ 	selfContainer, err := cgroups.GetOwnCgroupPath("cpu")
+ 	if err != nil {
+-		return nil, err
++		// cgroup v2 exposes one unified hierarchy instead of a dedicated CPU
++		// mount.  Keep the root identity so kubelet can start while the Docker
++		// runtime remains responsible for per-container resource enforcement.
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr == nil {
++			selfContainer = "/"
++			glog.Warningf("Using cgroup v2 compatibility mode for cAdvisor: %v", err)
++		} else {
++			return nil, err
++		}
+ 	}
+ 	glog.V(2).Infof("cAdvisor running in container: %q", selfContainer)
+ 
