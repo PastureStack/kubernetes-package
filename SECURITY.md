@@ -13,6 +13,9 @@ The published image is a compatibility candidate for isolated Catalog integratio
 - Quote credentials and URLs, fail closed on HTTP errors, and keep certificate archives outside logs.
 - Treat host mounts, cgroups, Docker socket access, kernel modules, firewall rules, and control-plane credentials as privileged interfaces.
 - Review the exact final image filesystem, configuration, layers, SBOM, and third-party legal files before distribution.
+- Run the Helm 2 compatibility server only as the dedicated UID and service account. Its compatibility role intentionally omits privilege-binding, escalation, impersonation, bulk deletion, certificate approval, and non-resource URL verbs. Charts can still create privileged workloads, so restrict Catalog authors and plan a separate Helm 3 migration.
+- Never use `replace --force` or `helm init --upgrade` for the Tiller transition. Snapshot release objects first, use a rolling Deployment update, verify the preserved record set, and roll back the Deployment revision on failure.
+- Keep the Azure CLI Python dependency set internally consistent. The current MSAL release requires `cryptography <49`, so the image pins `cryptography 48.0.1` with `pyOpenSSL 26.2.0` and makes `pip check` a release-blocking build step.
 
 ## Reporting
 

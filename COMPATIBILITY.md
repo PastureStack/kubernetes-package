@@ -9,3 +9,9 @@ Historical artifact tags containing an upstream vendor suffix are immutable exte
 Operator wait-state messages support `en-US` and `zh-TW`. Kubernetes YAML, API values, credentials, identifiers, labels, kubeconfigs, and command output are never translated.
 
 Before release, validate every role, certificate flow, metadata lookup, authentication webhook, add-on rendering, Docker API compatibility override, cgroup and mount path, control-plane startup, worker join, upgrade, and rollback in an isolated VM.
+
+The Helm 2 compatibility server and client are aligned at v2.17.0. The add-on
+manager uses a rolling Deployment update, retains ConfigMap and Secret release
+records, and restores the previous Deployment revision when readiness or record
+verification fails. This path does not run `helm init --upgrade`, convert
+release storage, delete workloads, or claim Helm 3 compatibility.

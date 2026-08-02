@@ -53,8 +53,11 @@ RUN set -eux; \
         util-linux \
         wget \
         xfsprogs; \
-    /opt/az/bin/python3 -m pip install --no-cache-dir --upgrade cryptography==48.0.1; \
-    /opt/az/bin/python3 -c 'import cryptography; assert cryptography.__version__ == "48.0.1"'; \
+    /opt/az/bin/python3 -m pip install --no-cache-dir --upgrade \
+        cryptography==48.0.1 \
+        pyOpenSSL==26.2.0; \
+    /opt/az/bin/python3 -c 'import cryptography, OpenSSL; assert cryptography.__version__ == "48.0.1"; assert OpenSSL.__version__ == "26.2.0"'; \
+    /opt/az/bin/python3 -m pip check; \
     az version; \
     apt-get autoremove -y; \
     apt-get clean; \

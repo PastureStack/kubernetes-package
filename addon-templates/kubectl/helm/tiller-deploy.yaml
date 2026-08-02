@@ -8,32 +8,72 @@ metadata:
     name: "tiller"
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
         app: "helm"
         name: "tiller"
     spec:
-      serviceAccountName: "$SYSTEM_SERVICE_ACCOUNT"
+      serviceAccountName: "$TILLER_SERVICE_ACCOUNT"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
       containers:
           - name: "tiller"
-            image: $DOCKER_IO_REGISTRY/$BASE_IMAGE_NAMESPACE/$TILLER_IMAGE
+            image: $TILLER_REGISTRY/$TILLER_IMAGE_NAMESPACE/$TILLER_IMAGE
             imagePullPolicy: "Always"
             command:
-            - /tiller
+            - /usr/local/bin/tiller
+            args:
             - --v=$ADDONS_LOG_VERBOSITY_LEVEL
+            securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                    drop:
+                    - ALL
             ports:
              - name: "tiller"
                containerPort: 44134
+             - name: "http"
+               containerPort: 44135
             livenessProbe:
-                initialDelaySeconds: 1
-                timeoutSeconds: 1
+                initialDelaySeconds: 5
+                timeoutSeconds: 2
+                failureThreshold: 12
                 httpGet:
                     path: "/liveness"
-                    port: 44135
+                    port: "http"
             readinessProbe:
-                initialDelaySeconds: 1
-                timeoutSeconds: 1
+                initialDelaySeconds: 5
+                timeoutSeconds: 2
+                failureThreshold: 12
                 httpGet:
                     path: "/readiness"
-                    port: 44135
+                    port: "http"
+            resources:
+                requests:
+                    cpu: 25m
+                    memory: 64Mi
+                limits:
+                    cpu: 500m
+                    memory: 256Mi
+            volumeMounts:
+              - name: home
+                mountPath: /home/pasturestack-tiller
+              - name: tmp
+                mountPath: /tmp
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

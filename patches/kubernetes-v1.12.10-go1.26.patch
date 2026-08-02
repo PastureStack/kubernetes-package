@@ -1,0 +1,18 @@
+diff --git a/vendor/github.com/ugorji/go/codec/gen.go b/vendor/github.com/ugorji/go/codec/gen.go
+index d2aa1f7f1a..3769227f91 100644
+--- a/vendor/github.com/ugorji/go/codec/gen.go
++++ b/vendor/github.com/ugorji/go/codec/gen.go
+@@ -8 +8 @@ import (
+-	"encoding/base64"
++	"encoding/base32"
+@@ -118,7 +118,10 @@ var (
+ 	genAllTypesSamePkgErr  = errors.New("All types must be in the same package")
+ 	genExpectArrayOrMapErr = errors.New("unexpected type. Expecting array/map/slice")
+-	genBase64enc           = base64.NewEncoding("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789__")
++	// Base64 cannot provide 64 distinct ASCII symbols that are all valid in a
++	// Go identifier. Go 1.26 rejects the historical duplicate '_' alphabet, so
++	// use the collision-free identifier encoding adopted by current codec.
++	genBase64enc           = base32.NewEncoding("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
+ 	genQNameRegex          = regexp.MustCompile(`[A-Za-z_.]+`)
+ 	genCheckVendor         bool
+ )

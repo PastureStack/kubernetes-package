@@ -8,7 +8,7 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 ## Project status
 
-The maintained candidate is `ghcr.io/pasturestack/kubernetes-package:v1.12.10-pasturestack.1`. It rebuilds the Kubernetes 1.12.10 kubelet with narrowly scoped Docker 29, cgroup v2, and sandbox IPC compatibility patches while retaining the verified upstream control-plane binaries. Personal registry coordinates and inherited CI/CD have been removed.
+The maintained candidate is `ghcr.io/pasturestack/kubernetes-package:v1.12.10-pasturestack.2`. It rebuilds the Kubernetes 1.12.10 kubelet with narrowly scoped Docker 29, cgroup v2, and sandbox IPC compatibility patches while retaining the verified upstream control-plane binaries. It also converges the Helm 2 compatibility server on `ghcr.io/pasturestack/tiller:v2.17.0-pasturestack.1` without deleting existing release records. Personal registry coordinates and inherited CI/CD have been removed.
 
 The candidate has passed binary-version checks, shell validation, an Ubuntu 26.04 and Docker 29 static-Pod lifecycle test, HIGH/CRITICAL vulnerability blocking, secret scanning, private-data checks, and CycloneDX SBOM generation. A complete Catalog release remains gated on multi-service control-plane, worker, add-on, upgrade, and rollback testing.
 
@@ -21,8 +21,8 @@ Run from a Docker-capable Linux host:
 ```sh
 make package \
   IMAGE_NAME=ghcr.io/pasturestack/kubernetes-package \
-  TAG=v1.12.10-pasturestack.1 \
-  KUBERNETES_BINARY_VERSION=v1.12.10-pasturestack.1
+  TAG=v1.12.10-pasturestack.2 \
+  KUBERNETES_BINARY_VERSION=v1.12.10-pasturestack.2
 ```
 
 The command verifies the upstream server archive, applies the documented compatibility patch, builds the kubelet, creates a local image, and records its name in `dist/images`. It does not push the image.
