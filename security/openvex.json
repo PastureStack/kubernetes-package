@@ -1,0 +1,35 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/PastureStack/kubernetes-package/security/openvex/v1.12.10-pasturestack.3",
+  "author": "PastureStack Security",
+  "timestamp": "2026-08-07T01:14:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-69247"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/cryptography@48.0.1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The image has no consumer outside the cryptography package that calls pkcs7_decrypt_der, pkcs7_decrypt_pem, or pkcs7_decrypt_smime, and it does not expose an attacker-controlled PKCS#7 EnvelopedData decryption service."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-69249"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/cryptography@48.0.1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The reviewed GitHub advisory defines the affected range as cryptography <=48.0.0; this image contains the patched 48.0.1 release."
+    }
+  ]
+}

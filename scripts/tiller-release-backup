@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+umask 077
+
+selector=${TILLER_RELEASE_SELECTOR:-OWNER=TILLER}
+kube_system_namespace=${TILLER_NAMESPACE:-kube-system}
+cleanup_paths=()
+
+cleanup() {
+    local path
+    for path in "${cleanup_paths[@]}"; do
+        if [ -n "${path}" ]; then
+            rm -rf -- "${path}"
+        fi
+    done
+}
+trap cleanup EXIT
+
+register_cleanup() {
+    cleanup_paths+=("$1")
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  tiller-release-backup snapshot --output DIR [--kubeconfig FILE]
+  tiller-release-backup verify   --input DIR
+  tiller-release-backup compare  --input DIR [--kubeconfig FILE]
+
+snapshot writes every Helm 2 ConfigMap and Secret revision into a mode-0700
+bundle outside the source tree. verify checks the bundle without contacting a
+cluster. compare is read-only and reports missing, added, or changed records.
+
+The bundle contains release data and may contain credentials. Never commit,
+upload, or attach it to a public issue.
+EOF
+}
+
+die() {
+    echo "TILLER_RELEASE_BACKUP_ERROR $*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+canonical_filter='def clean:
+  {
+    apiVersion,
+    kind,
+    metadata: {
+      name: .metadata.name,
+      namespace: .metadata.namespace,
+      labels: (.metadata.labels // {}),
+      annotations: (.metadata.annotations // {})
+    },
+    type: (.type // null),
+    immutable: (.immutable // null),
+    data: (.data // {}),
+    binaryData: (.binaryData // {})
+  };
+.items[] | clean'
+
+write_canonical() {
+    local source_file=$1
+    local output_file=$2
+    jq -cS "${canonical_filter}" "${source_file}" | sort > "${output_file}"
+}
+
+write_index() {
+    local source_file=$1
+    local output_file=$2
+    jq -r '.items[] | [
+      .kind,
+      .metadata.namespace,
+      .metadata.name,
+      (.metadata.labels.STATUS // ""),
+      (.metadata.labels.VERSION // "")
+    ] | @tsv' "${source_file}" | sort > "${output_file}"
+}
+
+assert_bundle_files() {
+    local bundle=$1
+    for file in manifest.json release-records.json release-records.canonical.jsonl release-index.tsv checksums.sha256; do
+        [ -f "${bundle}/${file}" ] || die "bundle file missing: ${file}"
+    done
+}
+
+verify_bundle() {
+    local bundle=$1
+    local verify_tmp expected_canonical_sha actual_canonical_sha
+
+    require_command jq
+    require_command sha256sum
+    require_command sort
+    require_command cmp
+    require_command awk
+    [ -d "${bundle}" ] || die "bundle directory not found: ${bundle}"
+    assert_bundle_files "${bundle}"
+    (
+      cd "${bundle}"
+      sha256sum --check --strict checksums.sha256 >/dev/null
+    ) || die "bundle checksum verification failed"
+    jq -e '.schemaVersion == 1 and .recordCount >= 0' "${bundle}/manifest.json" >/dev/null \
+      || die "bundle manifest is invalid"
+    jq -e '.kind == "List" and (.items | type == "array")' "${bundle}/release-records.json" >/dev/null \
+      || die "release-records.json is not a Kubernetes List"
+
+    verify_tmp=$(mktemp -d "${TMPDIR:-/tmp}/pasturestack-tiller-verify.XXXXXX")
+    register_cleanup "${verify_tmp}"
+    write_canonical "${bundle}/release-records.json" "${verify_tmp}/canonical.jsonl"
+    cmp -s "${bundle}/release-records.canonical.jsonl" "${verify_tmp}/canonical.jsonl" \
+      || die "canonical release content does not match release-records.json"
+    write_index "${bundle}/release-records.json" "${verify_tmp}/index.tsv"
+    cmp -s "${bundle}/release-index.tsv" "${verify_tmp}/index.tsv" \
+      || die "release index does not match release-records.json"
+
+    local expected_count actual_count
+    expected_count=$(jq -r '.recordCount' "${bundle}/manifest.json")
+    actual_count=$(jq -r '.items | length' "${bundle}/release-records.json")
+    [ "${expected_count}" = "${actual_count}" ] || die "record count mismatch: expected=${expected_count} actual=${actual_count}"
+    expected_canonical_sha=$(jq -r '.canonicalSha256' "${bundle}/manifest.json")
+    actual_canonical_sha=$(sha256sum "${bundle}/release-records.canonical.jsonl" | awk '{print $1}')
+    [ "${expected_canonical_sha}" = "${actual_canonical_sha}" ] \
+      || die "canonical release checksum does not match manifest"
+    rm -rf -- "${verify_tmp}"
+    echo "TILLER_RELEASE_BACKUP_VERIFY_OK records=${actual_count}"
+}
+
+snapshot_bundle() {
+    local output=$1
+    local repo_root output_parent output_name staging context tiller_image
+    local record_count configmap_count secret_count canonical_sha
+
+    require_command kubectl
+    require_command jq
+    require_command sha256sum
+    require_command sort
+
+    repo_root=$(cd "$(dirname "$0")/.." && pwd -P)
+    [ -d "$(dirname "${output}")" ] || die "output parent directory not found: $(dirname "${output}")"
+    output_parent=$(cd "$(dirname "${output}")" && pwd -P)
+    output_name=$(basename "${output}")
+    [ -n "${output_name}" ] && [ "${output_name}" != "." ] && [ "${output_name}" != ".." ] \
+      || die "invalid output directory"
+    output="${output_parent}/${output_name}"
+    case "${output}/" in
+      "${repo_root}/"*) die "output directory must be outside the source tree" ;;
+    esac
+    [ ! -e "${output}" ] || die "output already exists: ${output}"
+
+    staging=$(mktemp -d "${output_parent}/.${output_name}.tmp.XXXXXX")
+    chmod 0700 "${staging}"
+    register_cleanup "${staging}"
+
+    kubectl get configmaps,secrets --all-namespaces -l "${selector}" -o json \
+      > "${staging}/release-records.json"
+    jq -e '.kind == "List" and (.items | type == "array")' "${staging}/release-records.json" >/dev/null \
+      || die "cluster did not return a Kubernetes List"
+    write_canonical "${staging}/release-records.json" "${staging}/release-records.canonical.jsonl"
+    write_index "${staging}/release-records.json" "${staging}/release-index.tsv"
+
+    if kubectl --namespace="${kube_system_namespace}" get deployment tiller-deploy -o json \
+      > "${staging}/tiller-deployment.json" 2>/dev/null; then
+        tiller_image=$(jq -r '.spec.template.spec.containers[] | select(.name == "tiller") | .image' \
+          "${staging}/tiller-deployment.json" | head -n 1)
+    else
+        printf '{}\n' > "${staging}/tiller-deployment.json"
+        tiller_image='absent'
+    fi
+    if ! kubectl version -o json > "${staging}/kubernetes-version.json" 2>/dev/null; then
+        printf '{"status":"unavailable"}\n' > "${staging}/kubernetes-version.json"
+    fi
+
+    context=$(kubectl config current-context 2>/dev/null || printf 'unknown')
+    record_count=$(jq -r '.items | length' "${staging}/release-records.json")
+    configmap_count=$(jq -r '[.items[] | select(.kind == "ConfigMap")] | length' "${staging}/release-records.json")
+    secret_count=$(jq -r '[.items[] | select(.kind == "Secret")] | length' "${staging}/release-records.json")
+    canonical_sha=$(sha256sum "${staging}/release-records.canonical.jsonl" | awk '{print $1}')
+
+    jq -n \
+      --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg selector "${selector}" \
+      --arg context "${context}" \
+      --arg tillerImage "${tiller_image}" \
+      --arg canonicalSha256 "${canonical_sha}" \
+      --argjson recordCount "${record_count}" \
+      --argjson configMapCount "${configmap_count}" \
+      --argjson secretCount "${secret_count}" \
+      '{
+        schemaVersion: 1,
+        generatedAt: $generatedAt,
+        selector: $selector,
+        context: $context,
+        tillerImage: $tillerImage,
+        recordCount: $recordCount,
+        configMapCount: $configMapCount,
+        secretCount: $secretCount,
+        canonicalSha256: $canonicalSha256,
+        containsSensitiveReleaseData: true
+      }' > "${staging}/manifest.json"
+
+    (
+      cd "${staging}"
+      sha256sum manifest.json release-records.json release-records.canonical.jsonl release-index.tsv \
+        tiller-deployment.json kubernetes-version.json > checksums.sha256
+    )
+    chmod 0600 "${staging}"/*
+    verify_bundle "${staging}" >/dev/null
+    mv "${staging}" "${output}"
+    echo "TILLER_RELEASE_BACKUP_SNAPSHOT_OK records=${record_count} configmaps=${configmap_count} secrets=${secret_count} sha256=${canonical_sha} output=${output}"
+}
+
+compare_bundle() {
+    local bundle=$1
+    local compare_tmp result missing added changed
+
+    require_command kubectl
+    verify_bundle "${bundle}" >/dev/null
+    compare_tmp=$(mktemp -d "${TMPDIR:-/tmp}/pasturestack-tiller-compare.XXXXXX")
+    register_cleanup "${compare_tmp}"
+    kubectl get configmaps,secrets --all-namespaces -l "${selector}" -o json > "${compare_tmp}/current.json"
+
+    result=$(jq -n \
+      --slurpfile before "${bundle}/release-records.json" \
+      --slurpfile after "${compare_tmp}/current.json" '
+        def key: [.kind, .metadata.namespace, .metadata.name] | join("/");
+        def clean: {
+          apiVersion,
+          kind,
+          metadata: {
+            name: .metadata.name,
+            namespace: .metadata.namespace,
+            labels: (.metadata.labels // {}),
+            annotations: (.metadata.annotations // {})
+          },
+          type: (.type // null),
+          immutable: (.immutable // null),
+          data: (.data // {}),
+          binaryData: (.binaryData // {})
+        };
+        ($before[0].items | map({key: key, value: clean}) | from_entries) as $b |
+        ($after[0].items  | map({key: key, value: clean}) | from_entries) as $a |
+        {
+          missing: [($b | keys[]) as $k | select($a[$k] == null) | $k],
+          added:   [($a | keys[]) as $k | select($b[$k] == null) | $k],
+          changed: [($b | keys[]) as $k | select($a[$k] != null and $a[$k] != $b[$k]) | $k]
+        }')
+    printf '%s\n' "${result}" > "${compare_tmp}/result.json"
+    missing=$(jq -r '.missing | length' "${compare_tmp}/result.json")
+    added=$(jq -r '.added | length' "${compare_tmp}/result.json")
+    changed=$(jq -r '.changed | length' "${compare_tmp}/result.json")
+    jq -r '.missing[] | "MISSING " + .' "${compare_tmp}/result.json"
+    jq -r '.added[]   | "ADDED " + .' "${compare_tmp}/result.json"
+    jq -r '.changed[] | "CHANGED " + .' "${compare_tmp}/result.json"
+    rm -rf -- "${compare_tmp}"
+    if [ "${missing}" -ne 0 ] || [ "${added}" -ne 0 ] || [ "${changed}" -ne 0 ]; then
+        echo "TILLER_RELEASE_BACKUP_COMPARE_DIFFERENT missing=${missing} added=${added} changed=${changed}" >&2
+        return 3
+    fi
+    echo "TILLER_RELEASE_BACKUP_COMPARE_OK missing=0 added=0 changed=0"
+}
+
+command_name=${1:-}
+[ -n "${command_name}" ] || { usage >&2; exit 2; }
+shift
+
+input=''
+output=''
+kubeconfig=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --input) [ "$#" -ge 2 ] || die '--input requires a value'; input=$2; shift 2 ;;
+      --output) [ "$#" -ge 2 ] || die '--output requires a value'; output=$2; shift 2 ;;
+      --kubeconfig) [ "$#" -ge 2 ] || die '--kubeconfig requires a value'; kubeconfig=$2; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown argument: $1" ;;
+    esac
+done
+
+if [ -n "${kubeconfig}" ]; then
+    [ -f "${kubeconfig}" ] || die "kubeconfig not found: ${kubeconfig}"
+    export KUBECONFIG=${kubeconfig}
+fi
+
+case "${command_name}" in
+  snapshot) [ -n "${output}" ] || die 'snapshot requires --output'; snapshot_bundle "${output}" ;;
+  verify) [ -n "${input}" ] || die 'verify requires --input'; verify_bundle "${input}" ;;
+  compare) [ -n "${input}" ] || die 'compare requires --input'; compare_bundle "${input}" ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; die "unknown command: ${command_name}" ;;
+esac

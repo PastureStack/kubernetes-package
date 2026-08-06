@@ -1,0 +1,44 @@
+#!/bin/bash
+set -euo pipefail
+
+preferred_ca_root="${PLATFORM_CA_ROOT:-/var/lib/pasturestack/etc/ssl/ca.crt}"
+legacy_ca_root="/var/lib/rancher/etc/ssl/ca.crt"
+ca_root="${preferred_ca_root}"
+jks_store="${JAVA_CACERTS:-}"
+java_store_pass="${JAVA_STORE_PASS:-changeit}"
+system_ca_cert="/usr/share/ca-certificates/pasturestack/ca.crt"
+
+if [ ! -f "${ca_root}" ] && [ -f "${legacy_ca_root}" ]; then
+  ca_root="${legacy_ca_root}"
+fi
+
+if [ -z "${jks_store}" ]; then
+  for candidate in \
+    "${JAVA_HOME:-}/jre/lib/security/cacerts" \
+    "${JAVA_HOME:-}/lib/security/cacerts" \
+    "/etc/ssl/certs/java/cacerts"; do
+    if [ -f "${candidate}" ]; then
+      jks_store="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [ -f "${ca_root}" ]; then
+  if [ ! -e "${system_ca_cert}" ]; then
+    mkdir -p "$(dirname "${system_ca_cert}")"
+    cp "${ca_root}" "${system_ca_cert}"
+    if ! grep -Fxq "pasturestack/ca.crt" /etc/ca-certificates.conf; then
+      echo "pasturestack/ca.crt" >> /etc/ca-certificates.conf
+    fi
+    update-ca-certificates
+  fi
+
+  if [ -n "${jks_store}" ] && command -v keytool >/dev/null 2>&1; then
+    if keytool -list -keystore "${jks_store}" -alias pasturestack_ca -storepass "${java_store_pass}" >/dev/null 2>&1; then
+      keytool -delete -alias pasturestack_ca -storepass "${java_store_pass}" -keystore "${jks_store}" -noprompt
+    fi
+    keytool -import -trustcacerts -file "${ca_root}" -alias pasturestack_ca \
+      -keystore "${jks_store}" -storepass "${java_store_pass}" -noprompt
+  fi
+fi

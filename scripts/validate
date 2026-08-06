@@ -1,0 +1,111 @@
+#!/bin/bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+cd "${repo_root}"
+
+for script in package/*.sh package/update-platform-ca package/runc-1.10 \
+    scripts/entry scripts/package scripts/release scripts/version scripts/tiller-release-backup \
+    scripts/verify-go-toolchain-compatibility tests/test-tiller-release-backup.sh \
+    tests/test-tiller-upgrade.sh tests/test-release-gate.sh; do
+    bash -n "${script}"
+done
+
+required_markers=(
+    'FROM ubuntu:26.04'
+    'org.opencontainers.image.source="https://github.com/PastureStack/kubernetes-package"'
+    'PASTURESTACK_LOCALE=en-US'
+    'update-platform-ca'
+    'PLATFORM_METADATA_URL'
+    'PASTURESTACK_DOCKER_API_VERSION'
+    'KUBERNETES_SOURCE_COMMIT=71fde6aadce8b92456b88ee56c21e500f4919f0b'
+    'KUBE_GIT_VERSION_FILE'
+    'ARG SOURCE_REVISION=unknown'
+    'org.opencontainers.image.revision="${SOURCE_REVISION}"'
+    'KUBERNETES_BINARY_VERSION=${KUBERNETES_BINARY_VERSION:-v1.12.10-pasturestack.3}'
+    'KUBERNETES_SERVER_SHA256=f3df06f9bf2e4c4e8b5aba16d44197e26672aa06e8c24ab9f6ab4eaf64ab068e'
+    'kubernetes-v1.12.10-docker29-cgroupv2.patch'
+    'kubernetes-v1.12.10-go1.26.patch'
+    'GO_VERSION=1.26.5'
+    'GO_LINUX_AMD64_SHA256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053'
+    'GO111MODULE=off'
+    'GOTOOLCHAIN=local'
+    'DOCKER_VERSION=29.6.2'
+    'DOCKER_LINUX_AMD64_SHA256=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74'
+    'cryptography==48.0.1'
+    'pyOpenSSL==26.2.0'
+    '/opt/az/bin/python3 -m pip check'
+    'LocalStorageCapacityIsolation'
+    '/sys/fs/cgroup/cgroup.controllers'
+    'TILLER_IMAGE=${TILLER_IMAGE:-tiller:v2.17.0-pasturestack.2}'
+    'TILLER_REGISTRY=${TILLER_REGISTRY:-ghcr.io}'
+    'TILLER_SERVICE_ACCOUNT=${TILLER_SERVICE_ACCOUNT:-pasturestack-tiller}'
+    'snapshot_tiller_release_records'
+    'containsSensitiveReleaseData: true'
+    'TILLER_RELEASE_BACKUP_COMPARE_DIFFERENT'
+    'kubectl apply -f "${ADDONS_DIR}/helm"'
+    'rollout status deployment/tiller-deploy --timeout=120s'
+    'rollout undo deployment/tiller-deploy'
+    'restore_tiller_resources'
+    'comm -23 "${release_snapshot_dir}/before" "${release_snapshot_dir}/after"'
+    'runAsNonRoot: true'
+    'readOnlyRootFilesystem: true'
+    'allowPrivilegeEscalation: false'
+    'name: pasturestack-tiller-compat'
+)
+
+for marker in "${required_markers[@]}"; do
+    if ! grep -R -Fq "${marker}" Dockerfile.dapper package scripts patches; then
+        echo "KUBERNETES_PACKAGE_REQUIRED_MARKER_MISSING marker=${marker}" >&2
+        exit 1
+    fi
+done
+
+for executable in scripts/tiller-release-backup tests/test-tiller-release-backup.sh; do
+    if [ ! -x "${executable}" ]; then
+        echo "KUBERNETES_PACKAGE_REQUIRED_EXECUTABLE_MODE_MISSING file=${executable}" >&2
+        exit 1
+    fi
+done
+
+if grep -Fq 'docker/runc' package/Dockerfile ||
+    grep -Eq '/usr/bin/runc($|[[:space:];])|/usr/bin/runc-1\.11' package/Dockerfile; then
+    echo "KUBERNETES_PACKAGE_UNUSED_RUNC_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R -Fq 'tiller:v2.11.0' package addon-templates README.md SECURITY.md COMPATIBILITY.md; then
+    echo "KUBERNETES_PACKAGE_OBSOLETE_TILLER_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R --exclude=validate -Fq 'v2.17.0-pasturestack.1' package addon-templates README.md scripts tests; then
+    echo "KUBERNETES_PACKAGE_STALE_TILLER_CANDIDATE_PRESENT" >&2
+    exit 1
+fi
+
+if grep -Fq '"app=helm,$TILLER_IMAGE,$ADDONS_DIR/helm"' package/addons-update.sh; then
+    echo "KUBERNETES_PACKAGE_TILLER_FORCE_REPLACE_PATH_PRESENT" >&2
+    exit 1
+fi
+
+for forbidden_verb in bind escalate impersonate deletecollection approve sign; do
+    if grep -Eq "^[[:space:]]+- ${forbidden_verb}$" addon-templates/kubectl/helm/tiller-rbac.yaml; then
+        echo "KUBERNETES_PACKAGE_TILLER_FORBIDDEN_RBAC_VERB verb=${forbidden_verb}" >&2
+        exit 1
+    fi
+done
+
+if grep -R -E 'ghcr\.io/[[:alnum:]_.-]+/rc16|github\.com/[[:alnum:]_.-]+/rancher-1\.6-' \
+    README.md RELEASE.md Dockerfile.dapper package scripts patches addon-templates; then
+    echo "KUBERNETES_PACKAGE_PRIVATE_STAGING_REFERENCE_PRESENT" >&2
+    exit 1
+fi
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git diff --check
+fi
+bash tests/test-tiller-upgrade.sh
+bash tests/test-tiller-release-backup.sh
+bash tests/test-release-gate.sh
+echo "KUBERNETES_PACKAGE_MIGRATION_VALIDATION_OK"
