@@ -1,0 +1,6 @@
+*.sh text eol=lf
+scripts/* text eol=lf
+package/verify-azure-python-security text eol=lf
+package/runc-1.10 text eol=lf
+package/update-platform-ca text eol=lf
+*.patch text eol=lf -whitespace

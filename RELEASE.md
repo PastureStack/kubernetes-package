@@ -1,60 +1,23 @@
-# Building and Releasing Kubernetes
+# Release Review
 
-## Projects that build with dapper
+This migration repository does not contain CI/CD or automatic release behavior. Candidate artifacts may be published only after the exact image passes the package gates below. A Catalog release remains blocked until the integration gates also pass.
 
-1) Kubernetes-agent: https://github.com/rancher/kubernetes-agent
+## Package gates
 
-results in rancher/kubernetes-agent:tag image
+1. Every downloaded Kubernetes, CNI, Docker, and add-on artifact used by the package has a verified upstream source, immutable version, checksum, and license record.
+2. The exact image has a CycloneDX SBOM and reviewed third-party notice inventory.
+3. Two network-isolated builds from the same reviewed source, version file, source date, and immutable compiler image produce byte-identical kubelet binaries.
+4. Static shell validation, image build, binary version checks, and blocking HIGH/CRITICAL vulnerability and secret scans pass.
+5. The kubelet creates, runs, logs, stops, and removes the supplied static Pod on the supported Docker and cgroup environment without restarts; direct loopback CNI `ADD`/`DEL` also succeeds.
+6. CPU, memory, I/O, and writable-layer statistics become meaningful within the bounded observation window and agree with Docker for the same workload. The gate must also reproduce the known failure on the previous release.
+7. No personal registry, workstation path, credential, private endpoint, or staging namespace appears in the image configuration, filesystem, SBOM, documentation, or repository tree.
+8. The operator has created and verified an offline Helm 2 release-data bundle, compared it with the live cluster immediately before the change, and recorded only the non-sensitive checksum and record counts in private release evidence.
 
-2) Ingress controller: https://github.com/rancher/lb-controller
+## Catalog integration gates
 
-results in rancher/lb-service-rancher:tag image
+1. Control-plane, worker, certificate, metadata, and authentication-bridge services pass in the isolated VM environment.
+2. Required add-ons have verified images, provenance, licenses, and runtime tests.
+3. Installation, host join, restart, upgrade, rollback, and complete deletion pass through the Catalog UI and API.
+4. The Catalog uses a semantic image tag only; immutable digests remain in private release evidence and never appear in the UI value.
 
-3) Kubectld: https://github.com/rancher/kubectld
-
-results in rancher/kubectld:tag image
-
-
-## Building kubernetes
-
-Kubernetes image used for controller/k8s/kubelet/proxy/scheduler services. 
-Source: https://github.com/rancher/kubernetes
-Packaging: https://github.com/rancher/kubernetes-package
-
-If only packaging changes are required:
-
-1) Make changes in kubernetes-package.
-2) Create and push tag
-3) Run make, it should generate the image with the new tag.
-
-If kubernetes base got changed - either sync with upstream was performed, or some bug fix went in, do this:
-
-### https://github.com/rancher/kubernetes
-
-1) Build k8s binaries using  rancher-k8s-build/build.sh under .
-2) Create and push tag
-3) Upload binaries built on step 1 to the release
-
-### https://github.com/rancher/kubernetes-package
-
-1) Point dockerfile.dapper to a new binary:
-
-https://github.com/rancher/kubernetes-package/blob/master/Dockerfile.dapper#L18
-
-2) Commit the changes, create and push tag
-3) Run make to generate a new image.
-
-### Syncing rancher kubernetes with upstream
-
-1) Add remote git@github.com:kubernetes/kubernetes.git, lets call it upstream. Rancher is origin, git@github.com:rancher/kubernetes.git
-2) Lets say you need to update kubernetes rancher v1.5.1-rancher with k8s upstream v1.5.2. For that:
-
-git checkout -b v1.5.2-rancher v1.5.1-rancher
-git rebase -i v1.5.2
-git push origin v1.5.2-rancher
-
-### K8s template in rancher catalog
-
-https://github.com/rancher/rancher-catalog/tree/master/infra-templates/k8s
-
-Review recommended admission controllers and see if they have changed since the last release (https://github.com/kubernetes/kubernetes.github.io/blob/master/docs/admin/admission-controllers.md#is-there-a-recommended-set-of-plug-ins-to-use).
+The historical release procedure remains available in preserved upstream Git history. It is not copied into the current tree because its repositories, image names, and automation are not valid PastureStack release instructions.

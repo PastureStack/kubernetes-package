@@ -12,4 +12,10 @@ The following images are used by kubernetes addons:
     - heapster-amd64:v1.5.4
     - heapster-influxdb-amd64:v1.3.3
 - Helm:
-    - tiller:v2.11.0
+    - ghcr.io/pasturestack/tiller:v2.17.0-pasturestack.2
+
+The Helm 2 compatibility path updates Tiller with a rolling Deployment and
+verifies that every pre-existing ConfigMap or Secret release record remains
+present. Its dedicated service account may create ordinary Kubernetes
+resources for charts, but it is not granted `bind`, `escalate`, `impersonate`,
+`deletecollection`, certificate approval, or non-resource URL permissions.
