@@ -1,34 +1,186 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-source $(dirname $0)/version
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+cd "${repo_root}"
 
-ARCH=${ARCH:-"amd64"}
-SUFFIX=""
-[ "${ARCH}" != "amd64" ] && SUFFIX="_${ARCH}"
-
-cd $(dirname $0)/../package
-
-TAG=${TAG:-${VERSION}${SUFFIX}}
-REPO=${REPO:-rancher}
-
-if echo $TAG | grep -q dirty; then
-    TAG=dev
+if [ -z "${SOURCE_REVISION:-}" ]; then
+    SOURCE_REVISION=$(git -C "${repo_root}" rev-parse HEAD)
+    if [ -n "$(git -C "${repo_root}" status --porcelain)" ]; then
+        SOURCE_REVISION="${SOURCE_REVISION}-dirty"
+    fi
+fi
+if ! [[ "${SOURCE_REVISION}" =~ ^[0-9a-f]{40}(-dirty)?$ ]]; then
+    echo "SOURCE_REVISION must be a full Git commit, optionally suffixed with -dirty for a local candidate" >&2
+    exit 1
 fi
 
+ARCH=${ARCH:-"amd64"}
+if [ "${ARCH}" != "amd64" ]; then
+    echo "only the reviewed amd64 package is supported" >&2
+    exit 1
+fi
+
+cd "${repo_root}/package"
+
+KUBERNETES_SOURCE_VERSION=${KUBERNETES_SOURCE_VERSION:-v1.12.10}
+KUBERNETES_SOURCE_COMMIT=${KUBERNETES_SOURCE_COMMIT:-71fde6aadce8b92456b88ee56c21e500f4919f0b}
+KUBERNETES_SOURCE_DATE_EPOCH=1567540757
+KUBERNETES_BINARY_VERSION=${KUBERNETES_BINARY_VERSION:-v1.12.11}
+KUBERNETES_SERVER_SHA256=${KUBERNETES_SERVER_SHA256:-f3df06f9bf2e4c4e8b5aba16d44197e26672aa06e8c24ab9f6ab4eaf64ab068e}
+KUBERNETES_PATCH=../patches/kubernetes-v1.12.10-docker29-cgroupv2.patch
+KUBERNETES_GO_PATCH=../patches/kubernetes-v1.12.10-go1.26.patch
+CNI_VERSION=${CNI_VERSION:-v1.9.1}
+CNI_SOURCE_COMMIT=${CNI_SOURCE_COMMIT:-adc3e6b5b581638afbd194cf2e9319ecbb0151a1}
+CNI_SOURCE_ARCHIVE_SHA256=${CNI_SOURCE_ARCHIVE_SHA256:-3b723ab805f716f03820dfeee4289181d9ade76a34d628f9bb36120e44fe767e}
+CNI_LICENSE_SHA256=${CNI_LICENSE_SHA256:-b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1}
+CNI_BUILD_GO_VERSION=${CNI_BUILD_GO_VERSION:-1.26.5}
+
+if [ "${KUBERNETES_SOURCE_VERSION}" != "v1.12.10" ] || \
+    ! [[ "${KUBERNETES_SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || \
+    ! [[ "${KUBERNETES_BINARY_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+    ! [[ "${KUBERNETES_SERVER_SHA256}" =~ ^[0-9a-f]{64}$ ]] || \
+    [ "${CNI_VERSION}" != "v1.9.1" ] || \
+    [ "${CNI_SOURCE_COMMIT}" != "adc3e6b5b581638afbd194cf2e9319ecbb0151a1" ] || \
+    [ "${CNI_SOURCE_ARCHIVE_SHA256}" != "3b723ab805f716f03820dfeee4289181d9ade76a34d628f9bb36120e44fe767e" ] || \
+    [ "${CNI_LICENSE_SHA256}" != "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1" ] || \
+    [ "${CNI_BUILD_GO_VERSION}" != "1.26.5" ]; then
+    echo "invalid Kubernetes source or numeric build-version lock" >&2
+    exit 1
+fi
+
+KUBERNETES_BUILD_ROOT=$(mktemp -d /tmp/pasturestack-kubernetes-build.XXXXXX)
+KUBERNETES_GOPATH=${KUBERNETES_BUILD_ROOT}/gopath
+KUBERNETES_SOURCE_ROOT=${KUBERNETES_GOPATH}/src/k8s.io/kubernetes
+
+cleanup() {
+    rm -f kubectl kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler \
+        loopback CNI-LICENSE LICENSE SECURITY.md ORIGIN.md COMPATIBILITY.md
+    if [ -n "${KUBERNETES_BUILD_ROOT:-}" ]; then
+        rm -rf "${KUBERNETES_BUILD_ROOT}"
+    fi
+}
+trap cleanup EXIT
+
+TAG=${TAG:-${KUBERNETES_BINARY_VERSION}}
+REPO=${REPO:-pasturestack}
+IMAGE_NAME=${IMAGE_NAME:-}
+IMAGE=${IMAGE:-}
+
+if ! [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "TAG must be a numeric semantic version such as v1.12.11" >&2
+    exit 1
+fi
+
+echo "${KUBERNETES_SERVER_SHA256}  ${DOWNLOAD}/k8s.tar.gz" | sha256sum -c -
 tar xvzf $DOWNLOAD/k8s.tar.gz --strip-components=3 kubernetes/server/bin/{kubelet,kube-proxy,kube-apiserver,kube-controller-manager,kube-scheduler,kubectl}
-tar xvzf $DOWNLOAD/k8s.tar.gz kubernetes/kubernetes-src.tar.gz
+tar xOzf $DOWNLOAD/k8s.tar.gz kubernetes/kubernetes-src.tar.gz > "${KUBERNETES_BUILD_ROOT}/kubernetes-src.tar.gz"
+mkdir -p "${KUBERNETES_SOURCE_ROOT}"
+tar xzf "${KUBERNETES_BUILD_ROOT}/kubernetes-src.tar.gz" \
+    -C "${KUBERNETES_SOURCE_ROOT}"
+
+(
+    cd "${KUBERNETES_SOURCE_ROOT}"
+    patch --batch --forward --fuzz=0 -p1 < "${OLDPWD}/${KUBERNETES_PATCH}"
+    patch --batch --forward --fuzz=0 -p1 < "${OLDPWD}/${KUBERNETES_GO_PATCH}"
+    KUBERNETES_VERSION_FILE="${KUBERNETES_BUILD_ROOT}/version-vars"
+    cat > "${KUBERNETES_VERSION_FILE}" <<EOF
+KUBE_GIT_COMMIT='${KUBERNETES_SOURCE_COMMIT}'
+KUBE_GIT_TREE_STATE='clean'
+KUBE_GIT_VERSION='${KUBERNETES_BINARY_VERSION}'
+KUBE_GIT_MAJOR='1'
+KUBE_GIT_MINOR='12'
+EOF
+    KUBE_GIT_VERSION_FILE="${KUBERNETES_VERSION_FILE}" \
+    SOURCE_DATE_EPOCH="${KUBERNETES_SOURCE_DATE_EPOCH}" \
+    GOPATH="${KUBERNETES_GOPATH}" \
+    GO111MODULE=off \
+    GOTOOLCHAIN=local \
+    bash -c '
+        source hack/lib/init.sh
+        kubernetes_ldflags="$(kube::version::ldflags)"
+        # Kubernetes 1.12 intentionally omits the generated OpenAPI source
+        # from its source archive.  Recreate all required generated files with
+        # the upstream Make target before compiling the server executables.
+        make generated_files
+        test -s pkg/generated/openapi/zz_generated.openapi.go
+        grep -Fq "func GetOpenAPIDefinitions" \
+            pkg/generated/openapi/zz_generated.openapi.go
+        mkdir -p _output/local/bin/linux/amd64
+        for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; do
+            for pass in first second; do
+                CGO_ENABLED=1 go build \
+                    -trimpath \
+                    -ldflags "-buildid= ${kubernetes_ldflags}" \
+                    -o "_output/local/bin/linux/amd64/${binary}.${pass}" \
+                    "./cmd/${binary}"
+            done
+            cmp "_output/local/bin/linux/amd64/${binary}.first" \
+                "_output/local/bin/linux/amd64/${binary}.second"
+            mv "_output/local/bin/linux/amd64/${binary}.first" \
+                "_output/local/bin/linux/amd64/${binary}"
+            rm "_output/local/bin/linux/amd64/${binary}.second"
+        done
+    '
+    for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; do
+        install -m 0755 "_output/local/bin/linux/amd64/${binary}" "${OLDPWD}/${binary}"
+    done
+)
+
+for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler; do
+    actual_version=$("./${binary}" --version)
+    if [ "${actual_version}" != "Kubernetes ${KUBERNETES_BINARY_VERSION}" ]; then
+        echo "unexpected ${binary} version: ${actual_version}" >&2
+        exit 1
+    fi
+done
+kubectl_version=$(./kubectl version --client=true --short=true)
+if ! grep -Fq "${KUBERNETES_BINARY_VERSION}" <<< "${kubectl_version}"; then
+    echo "unexpected kubectl version: ${kubectl_version}" >&2
+    exit 1
+fi
+if grep -a -Fq "${KUBERNETES_BUILD_ROOT}" kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; then
+    echo "KUBERNETES_PACKAGE_NON_REPRODUCIBLE_PATH_PRESENT" >&2
+    exit 1
+fi
+rm -rf "${KUBERNETES_BUILD_ROOT}"
+KUBERNETES_BUILD_ROOT=
+
+install -m 0755 /usr/src/cni-loopback loopback
+install -m 0644 /usr/src/CNI-LICENSE CNI-LICENSE
+echo "${CNI_LICENSE_SHA256}  CNI-LICENSE" | sha256sum -c -
+mkdir -p ../dist
+go version -m ./loopback > ../dist/cni-loopback-go-version.txt
+./loopback > ../dist/cni-loopback-version.txt 2>&1
+grep -F "go${CNI_BUILD_GO_VERSION}" ../dist/cni-loopback-go-version.txt
+grep -F "CNI loopback plugin ${CNI_VERSION}" ../dist/cni-loopback-version.txt
+sha256sum loopback > ../dist/cni-loopback.sha256
 
 mkdir -p kubernetes/cluster/addons
 
 cp -r ../addon-templates/kubectl/* kubernetes/cluster/addons/
+cp ../LICENSE ../SECURITY.md ../ORIGIN.md ../COMPATIBILITY.md .
 
 for t in kubernetes/cluster/addons/dns/*.yaml.sed; do
     sed -f dns.sed <${t} >${t%.sed} && rm ${t}
     echo ${t%.sed}
 done
 
-IMAGE=${REPO}/k8s:${TAG}
-docker build -t ${IMAGE} .
-echo ${IMAGE} > ../dist/images
-echo Built ${IMAGE}
+if [ -z "${IMAGE}" ]; then
+    if [ -n "${IMAGE_NAME}" ]; then
+        IMAGE="${IMAGE_NAME}:${TAG}"
+    else
+        IMAGE="${REPO}/k8s:${TAG}"
+    fi
+fi
+
+docker build \
+    --build-arg "IMAGE_VERSION=${TAG}" \
+    --build-arg "SOURCE_REVISION=${SOURCE_REVISION}" \
+    -t "${IMAGE}" .
+test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = \
+    "https://github.com/PastureStack/kubernetes-package"
+test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "${TAG}"
+test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${SOURCE_REVISION}"
+echo "${IMAGE}" > ../dist/images
+echo "Built ${IMAGE} from ${SOURCE_REVISION}"

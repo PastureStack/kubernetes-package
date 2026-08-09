@@ -1,0 +1,414 @@
+#!/bin/bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+cd "${repo_root}"
+
+for script in package/*.sh package/update-platform-ca package/runc-1.10 \
+    scripts/entry scripts/package scripts/release scripts/version scripts/tiller-release-backup \
+    scripts/generate-dapper-openvex scripts/prepare-cluster-dns-source \
+    scripts/verify-go-toolchain-compatibility tests/test-tiller-release-backup.sh \
+    tests/test-tiller-upgrade.sh tests/test-addon-upgrade.sh tests/test-release-gate.sh; do
+    bash -n "${script}"
+done
+
+required_markers=(
+    'FROM ubuntu:26.04'
+    'docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144 AS snapshot-ca-certificates'
+    'ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03'
+    "UBUNTU_APT_SNAPSHOT='20260808T000000Z'"
+    'COPY package/ubuntu-apt.lock /licenses/ubuntu-apt.lock'
+    'COPY ubuntu-apt.lock /licenses/ubuntu-apt.lock'
+    'apt-get --snapshot "${UBUNTU_APT_SNAPSHOT}" update'
+    'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt"'
+    'Acquire::AllowInsecureRepositories "false"'
+    'APT::Get::AllowUnauthenticated "false"'
+    'DAPPER-UBUNTU-APT-PACKAGES.tsv'
+    'DAPPER-LINUX-LIBC-DEV-FILES.txt'
+    'KUBERNETES-PACKAGE-UBUNTU-APT-PACKAGES.tsv'
+    'jq="${UBUNTU_APT_JQ_VERSION}"'
+    'org.opencontainers.image.source="https://github.com/PastureStack/kubernetes-package"'
+    'PASTURESTACK_LOCALE=en-US'
+    'update-platform-ca'
+    'PLATFORM_METADATA_URL'
+    'PASTURESTACK_DOCKER_API_VERSION'
+    'KUBERNETES_SOURCE_VERSION=v1.12.10'
+    'KUBERNETES_SOURCE_COMMIT=71fde6aadce8b92456b88ee56c21e500f4919f0b'
+    'KUBERNETES_SOURCE_REPOSITORY_ID=43760763'
+    'KUBERNETES_SERVER_RELEASE_ASSET_ID=14729275'
+    'https://api.github.com/repositories/${KUBERNETES_SOURCE_REPOSITORY_ID}/releases/assets/${KUBERNETES_SERVER_RELEASE_ASSET_ID}'
+    "Accept: application/octet-stream"
+    'KUBE_GIT_VERSION_FILE'
+    'ARG SOURCE_REVISION=unknown'
+    'org.opencontainers.image.revision="${SOURCE_REVISION}"'
+    'KUBERNETES_BINARY_VERSION=${KUBERNETES_BINARY_VERSION:-v1.12.11}'
+    'TAG=${TAG:-${KUBERNETES_BINARY_VERSION}}'
+    'TAG must be a numeric semantic version such as v1.12.11'
+    'KUBERNETES_SERVER_SHA256=f3df06f9bf2e4c4e8b5aba16d44197e26672aa06e8c24ab9f6ab4eaf64ab068e'
+    'kubernetes-v1.12.10-docker29-cgroupv2.patch'
+    'kubernetes-v1.12.10-go1.26.patch'
+    'GO_VERSION=1.26.5'
+    'GO_LINUX_AMD64_SHA256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053'
+    'GO111MODULE=off'
+    'GOTOOLCHAIN=local'
+    'KUBERNETES_GOPATH=${KUBERNETES_BUILD_ROOT}/gopath'
+    'KUBERNETES_SOURCE_ROOT=${KUBERNETES_GOPATH}/src/k8s.io/kubernetes'
+    'kube::version::ldflags'
+    'make generated_files'
+    'pkg/generated/openapi/zz_generated.openapi.go'
+    'func GetOpenAPIDefinitions'
+    'CGO_ENABLED=1 go build'
+    'for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl'
+    'for pass in first second'
+    '-buildid='
+    'cmp "_output/local/bin/linux/amd64/${binary}.first"'
+    '-trimpath'
+    'KUBERNETES_PACKAGE_NON_REPRODUCIBLE_PATH_PRESENT'
+    'DOCKER_VERSION=29.6.2'
+    'DOCKER_LINUX_AMD64_SHA256=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74'
+    'AZURE_CLI_VERSION=2.89.0'
+    'AZURE_CLI_DEB_VERSION=2.89.0-1~noble'
+    'AZURE_CLI_DEB_SHA256=5244e06ecb7c77a97d58bdb782e23445a3b123fb4422bb56810428131bc8f902'
+    'CRYPTOGRAPHY_VERSION=48.0.1'
+    'CRYPTOGRAPHY_WHEEL_SHA256=0ee6ea481db1ab889cba043ec1eda17bb9c1ea79db6722f779c3667f9f70322f'
+    'PYOPENSSL_VERSION=26.2.0'
+    'PYOPENSSL_WHEEL_SHA256=4f9d971bc5298b8bc1fab282803da04bf000c755d4ad9d99b52de2569ca19a70'
+    'cryptography_wheel="/tmp/cryptography-${CRYPTOGRAPHY_VERSION}-cp311-abi3-manylinux_2_34_x86_64.whl"'
+    'pyopenssl_wheel="/tmp/pyopenssl-${PYOPENSSL_VERSION}-py3-none-any.whl"'
+    '--no-cache-dir --no-index --no-deps --upgrade'
+    '/opt/az/bin/python3 -m pip check'
+    'verify-azure-python-security'
+    'KUBERNETES_PACKAGE_AZURE_PYTHON_SECURITY_OK'
+    'LocalStorageCapacityIsolation'
+    '/sys/fs/cgroup/cgroup.controllers'
+    'CNI_VERSION=v1.9.1'
+    'CNI_SOURCE_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1'
+    'CNI_SOURCE_DATE_EPOCH=1771500712'
+    'CNI_SOURCE_ARCHIVE_SHA256=3b723ab805f716f03820dfeee4289181d9ade76a34d628f9bb36120e44fe767e'
+    'CNI_LICENSE_SHA256=b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1'
+    'CNI_BUILD_GO_VERSION=1.26.5'
+    '/licenses/CNI-LICENSE'
+    'https://codeload.github.com/containernetworking/plugins/tar.gz/${CNI_SOURCE_COMMIT}'
+    'GOPROXY=off GOSUMDB=off'
+    'go test -c -mod=vendor -o /tmp/cni-loopback-tests ./plugins/main/loopback'
+    'github.com/containernetworking/plugins/pkg/utils/buildversion.BuildVersion=${CNI_VERSION}'
+    'cmp /tmp/cni-loopback.first /tmp/cni-loopback.second'
+    'go version -m ./loopback'
+    'TILLER_IMAGE=${TILLER_IMAGE:-tiller:v2.17.1}'
+    'TILLER_REGISTRY=${TILLER_REGISTRY:-ghcr.io}'
+    'TILLER_SERVICE_ACCOUNT=${TILLER_SERVICE_ACCOUNT:-pasturestack-tiller}'
+    'CLUSTER_DNS_IMAGE=${CLUSTER_DNS_IMAGE:-cluster-dns:1.26.9}'
+    'DNS_IMAGE_REGISTRY=${DNS_IMAGE_REGISTRY:-ghcr.io}'
+    'DNS_IMAGE_NAMESPACE=${DNS_IMAGE_NAMESPACE:-pasturestack}'
+    "source_revision='c3ddef3eb784fd06be17fd056acc79f2a6d709ce'"
+    "source_archive_sha256='1d4cb1dafc6b6c0456b3073ae88d5e3991835677ae04fae130f045f0613b4948'"
+    "source_license_sha256='b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1'"
+    'kubernetes-dns-1.26.9-cluster-only.patch'
+    "grep -R -l 'validateForwardProxy'"
+    'FROM gcr.io/distroless/static-debian12@sha256:4b2a093ef4649bccd586625090a3c668b254cfe180dee54f4c94f3e9bd7e381e'
+    'image: $DNS_IMAGE_REGISTRY/$DNS_IMAGE_NAMESPACE/$CLUSTER_DNS_IMAGE'
+    'targetPort: dns-local'
+    'targetPort: dns-tcp-local'
+    'USER 65532:65532'
+    'ENV KUBE_FEATURE_WatchListClient=false'
+    'io.pasturestack.third-party-licenses="/licenses/cluster-dns-third-party"'
+    'report_preserved_legacy_addons'
+    'converge_dns'
+    'restore_dns_resources'
+    'Unable to snapshot the kube-dns Service before the update'
+    'kube-dns rollout produced an unexpected container set'
+    'Refusing to change kube-dns Service cluster IP'
+    'serviceAccountName: $DNS_SERVICE_ACCOUNT'
+    'name: "$DNS_SERVICE_ACCOUNT"'
+    'snapshot_tiller_release_records'
+    'containsSensitiveReleaseData: true'
+    'TILLER_RELEASE_BACKUP_COMPARE_DIFFERENT'
+    'kubectl apply -f "${ADDONS_DIR}/helm"'
+    'rollout status deployment/tiller-deploy --timeout=120s'
+    'rollout undo deployment/tiller-deploy'
+    'restore_tiller_resources'
+    'comm -23 "${release_snapshot_dir}/before" "${release_snapshot_dir}/after"'
+    'runAsNonRoot: true'
+    'runAsUser: 65532'
+    'initialDelaySeconds: 75'
+    '--initial-sync-timeout=60s'
+    'name: KUBE_FEATURE_WatchListClient'
+    'preferredDuringSchedulingIgnoredDuringExecution:'
+    'readOnlyRootFilesystem: true'
+    'allowPrivilegeEscalation: false'
+    'name: pasturestack-tiller-compat'
+)
+
+for marker in "${required_markers[@]}"; do
+    if ! grep -R -Fq -- "${marker}" Dockerfile.dapper package scripts patches dns-image addon-templates; then
+        echo "KUBERNETES_PACKAGE_REQUIRED_MARKER_MISSING marker=${marker}" >&2
+        exit 1
+    fi
+done
+
+source package/ubuntu-apt.lock
+test "${UBUNTU_APT_SNAPSHOT}" = '20260808T000000Z'
+for package_version_variable in \
+    UBUNTU_APT_BASH_VERSION \
+    UBUNTU_APT_BUILD_ESSENTIAL_VERSION \
+    UBUNTU_APT_CA_CERTIFICATES_VERSION \
+    UBUNTU_APT_CEPH_COMMON_VERSION \
+    UBUNTU_APT_CIFS_UTILS_VERSION \
+    UBUNTU_APT_CONNTRACK_VERSION \
+    UBUNTU_APT_CURL_VERSION \
+    UBUNTU_APT_ETHTOOL_VERSION \
+    UBUNTU_APT_FILE_VERSION \
+    UBUNTU_APT_GCC_VERSION \
+    UBUNTU_APT_GIT_VERSION \
+    UBUNTU_APT_GLUSTERFS_CLIENT_VERSION \
+    UBUNTU_APT_IPSET_VERSION \
+    UBUNTU_APT_IPTABLES_VERSION \
+    UBUNTU_APT_JQ_VERSION \
+    UBUNTU_APT_LIBC6_DEV_VERSION \
+    UBUNTU_APT_LINUX_LIBC_DEV_VERSION \
+    UBUNTU_APT_MAKE_VERSION \
+    UBUNTU_APT_NETCAT_OPENBSD_VERSION \
+    UBUNTU_APT_NFS_COMMON_VERSION \
+    UBUNTU_APT_OPEN_ISCSI_VERSION \
+    UBUNTU_APT_PATCH_VERSION \
+    UBUNTU_APT_RSYNC_VERSION \
+    UBUNTU_APT_SOCAT_VERSION \
+    UBUNTU_APT_TAR_VERSION \
+    UBUNTU_APT_UNZIP_VERSION \
+    UBUNTU_APT_UTIL_LINUX_VERSION \
+    UBUNTU_APT_WGET_VERSION \
+    UBUNTU_APT_XFSPROGS_VERSION \
+    UBUNTU_APT_XZ_UTILS_VERSION; do
+    if [ -z "${!package_version_variable:-}" ]; then
+        echo "KUBERNETES_PACKAGE_UBUNTU_LOCK_VALUE_MISSING variable=${package_version_variable}" >&2
+        exit 1
+    fi
+done
+
+if grep -R -E 'packages\.microsoft\.com/(keys|repos/azure-cli/[^/]*[[:space:]]+main)' package/Dockerfile; then
+    echo "KUBERNETES_PACKAGE_MUTABLE_MICROSOFT_APT_SOURCE_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R -E 'CRYPTOGRAPHY_VERSION=50\.0\.0|PYOPENSSL_VERSION=26\.4\.0|msal-1\.37\.0' \
+    Dockerfile.dapper package scripts tests; then
+    echo "KUBERNETES_PACKAGE_STALE_SECURITY_OR_VERSION_INPUT_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R --exclude=validate -Fq 'cni-plugins-linux-amd64' \
+    Dockerfile.dapper package scripts .github/workflows; then
+    echo "KUBERNETES_PACKAGE_INHERITED_CNI_PREBUILT_PRESENT" >&2
+    exit 1
+fi
+
+if ! jq -e '
+    .statements | length == 2 and
+    ([.[].vulnerability.name] | sort == ["CVE-2026-69247", "CVE-2026-69249"]) and
+    all(.[].products[]; .["@id"] == "pkg:pypi/cryptography@48.0.1") and
+    all(.[]; .status == "not_affected" and .justification == "vulnerable_code_not_in_execute_path")
+' security/openvex.json >/dev/null; then
+    echo "KUBERNETES_PACKAGE_OPENVEX_REVIEW_INVALID" >&2
+    exit 1
+fi
+
+dapper_reviewed_cves=security/dapper-linux-libc-dev-reviewed-cves.txt
+if [ "$(wc -l < "${dapper_reviewed_cves}")" -ne 46 ] || \
+    grep -Evq '^CVE-[0-9]{4}-[0-9]{4,}$' "${dapper_reviewed_cves}" || \
+    ! LC_ALL=C sort -cu "${dapper_reviewed_cves}"; then
+    echo "KUBERNETES_PACKAGE_DAPPER_REVIEWED_CVE_LIST_INVALID" >&2
+    exit 1
+fi
+if ! bash scripts/generate-dapper-openvex | jq -e \
+    --arg product "pkg:deb/ubuntu/linux-libc-dev@${UBUNTU_APT_LINUX_LIBC_DEV_VERSION}?arch=amd64&distro=ubuntu-26.04" '
+      .statements | length == 46 and
+      all(.[];
+        .products == [{"@id": $product}] and
+        .status == "not_affected" and
+        .justification == "vulnerable_code_not_in_execute_path")
+    ' >/dev/null; then
+    echo "KUBERNETES_PACKAGE_DAPPER_OPENVEX_INVALID" >&2
+    exit 1
+fi
+
+security_workflow=.github/workflows/security-release-gate.yml
+for workflow_marker in \
+    'workflow_dispatch:' \
+    'group: kubernetes-package-security-${{ github.ref }}-${{ github.sha }}' \
+    'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
+    'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
+    'TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c' \
+    'ETCD_TEST_IMAGE: pasturestack/etcd-image:v3.7.2' \
+    'ETCD_TEST_UPSTREAM_VERSION: 3.7.1' \
+    'ETCD_TEST_SOURCE_REVISION: 24c626275522fbc3a4c9683cc90ff489b2b366de' \
+    'ETCD_TEST_SOURCE_TREE: 9bbe6c138bd005fd2798d842ebfaae3aeac5579c' \
+    'Build the exact supported etcd integration candidate' \
+    'git -C "$source_dir" fetch --depth=1 --no-tags origin "$ETCD_TEST_SOURCE_REVISION"' \
+    '--output /evidence/etcd-integration.raw.json' \
+    '--output /evidence/etcd-integration.cdx.json' \
+    "--tmpfs '/tmp:rw,noexec,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=0700'" \
+    '--storage-backend=etcd3' \
+    '.kubernetes_dns.etcd.version == "3.7.2"' \
+    '.kubernetes_dns.etcd.upstream_version == "3.7.1"' \
+    '.kubernetes_dns.etcd.critical == 0' \
+    '.kubernetes_dns.etcd.high == 0' \
+    '.kubernetes_dns.etcd.secrets == 0' \
+    'CLUSTER_DNS_IMAGE: ghcr.io/pasturestack/cluster-dns:1.26.9' \
+    'CLUSTER_DNS_UPSTREAM_REVISION: c3ddef3eb784fd06be17fd056acc79f2a6d709ce' \
+    'CLUSTER_DNS_BASE_IMAGE: gcr.io/distroless/static-debian12@sha256:4b2a093ef4649bccd586625090a3c668b254cfe180dee54f4c94f3e9bd7e381e' \
+    'bash scripts/prepare-cluster-dns-source "$dns_source"' \
+    'dns_source="$dns_source_root/source"' \
+    'cmp /out/cluster-dns.first /out/cluster-dns.second' \
+    'test "$license_count" -eq 106' \
+    'cluster-dns-third-party-license-sha256.txt' \
+    'dist/cluster-dns-image-licenses/cluster-dns-third-party' \
+    "test \"\$(docker image inspect \"\$CLUSTER_DNS_IMAGE\" --format '{{.Config.User}}')\" = '65532:65532'" \
+    "grep -Fx 'KUBE_FEATURE_WatchListClient=false'" \
+    '--output /evidence/cluster-dns.raw.json' \
+    "Version: 0.73.0" \
+    '--network none' \
+    '--vex /workspace/security/openvex.json' \
+    '--vex /workspace/dist/dapper-openvex.json' \
+    'dist/dapper-openvex.json' \
+    'dist/dapper.applicable.json' \
+    'dist/security-counts.json' \
+    'dist/dapper-high-critical-findings.tsv' \
+    'io.pasturestack.cni.go.version' \
+    'dist/cni-loopback-go-version.txt' \
+    'dist/cni-loopback-version.txt' \
+    'dist/cni-loopback.sha256' \
+    'dist/*.sha256' \
+    'dist/kubernetes-dns-integration.json' \
+    'Prove Kubernetes 1.12 DNS compatibility and least privilege' \
+    '--network-alias cluster-dns' \
+    '--entrypoint /opt/az/bin/python3 "$IMAGE" -' \
+    '("cluster-dns", 10053)' \
+    '.kubernetes_dns.cluster_dns.critical == 0' \
+    '.kubernetes_dns.cluster_dns.high == 0' \
+    '.kubernetes_dns.cluster_dns.secrets == 0' \
+    '.kubernetes_dns.integration_passed == true' \
+    'Enforce the recorded security result' \
+    '.dapper_applicable_high == 0' \
+    '.dapper_reviewed == .dapper_vex_statements' \
+    'retention-days: 7'; do
+    if ! grep -Fq -- "${workflow_marker}" "${security_workflow}"; then
+        echo "KUBERNETES_PACKAGE_SECURITY_WORKFLOW_MARKER_MISSING marker=${workflow_marker}" >&2
+        exit 1
+    fi
+done
+upload_evidence_line=$(grep -n -m1 'Upload short-lived SBOM and scan evidence' "${security_workflow}" | cut -d: -f1)
+enforce_result_line=$(grep -n -m1 'Enforce the recorded security result' "${security_workflow}" | cut -d: -f1)
+if [ -z "${upload_evidence_line}" ] || [ -z "${enforce_result_line}" ] || \
+    [ "${upload_evidence_line}" -ge "${enforce_result_line}" ]; then
+    echo "KUBERNETES_PACKAGE_SECURITY_EVIDENCE_NOT_UPLOADED_BEFORE_ENFORCEMENT" >&2
+    exit 1
+fi
+if grep -Eq '^[[:space:]]+(push|pull_request|schedule):' "${security_workflow}" || \
+    grep -Eq 'docker[[:space:]]+push|gh[[:space:]]+release[[:space:]]+create' "${security_workflow}" || \
+    grep -Fq 'registry.k8s.io/etcd-amd64:3.2.24' "${security_workflow}" || \
+    grep -Fq -- '-p 127.0.0.1:1053' "${security_workflow}" || \
+    grep -E '^[[:space:]]+uses:' "${security_workflow}" | grep -Ev '@[0-9a-f]{40}$'; then
+    echo "KUBERNETES_PACKAGE_SECURITY_WORKFLOW_POLICY_VIOLATION" >&2
+    exit 1
+fi
+
+for executable in package/verify-azure-python-security scripts/prepare-cluster-dns-source \
+    scripts/tiller-release-backup \
+    tests/test-tiller-release-backup.sh tests/test-addon-upgrade.sh; do
+    if [ ! -x "${executable}" ]; then
+        echo "KUBERNETES_PACKAGE_REQUIRED_EXECUTABLE_MODE_MISSING file=${executable}" >&2
+        exit 1
+    fi
+done
+
+if grep -Fq 'docker/runc' package/Dockerfile ||
+    grep -Eq '/usr/bin/runc($|[[:space:];])|/usr/bin/runc-1\.11' package/Dockerfile; then
+    echo "KUBERNETES_PACKAGE_UNUSED_RUNC_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R -Fq 'tiller:v2.11.0' package addon-templates README.md SECURITY.md COMPATIBILITY.md; then
+    echo "KUBERNETES_PACKAGE_OBSOLETE_TILLER_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R --exclude=validate -E 'v[0-9]+\.[0-9]+\.[0-9]+-[[:alnum:].]+' \
+    Dockerfile.dapper package/Dockerfile package/addons-update.sh addon-templates/README.md \
+    README.md SECURITY.md COMPATIBILITY.md RELEASE.md; then
+    echo "KUBERNETES_PACKAGE_BRANDED_VERSION_SUFFIX_PRESENT" >&2
+    exit 1
+fi
+
+if grep -Eq 'source .*scripts/version|TAG=.*VERSION.*SUFFIX|TAG=dev|SUFFIX=""' scripts/package; then
+    echo "KUBERNETES_PACKAGE_GIT_DERIVED_OR_SUFFIXED_TAG_PRESENT" >&2
+    exit 1
+fi
+
+if grep -Fq '"app=helm,$TILLER_IMAGE,$ADDONS_DIR/helm"' package/addons-update.sh; then
+    echo "KUBERNETES_PACKAGE_TILLER_FORCE_REPLACE_PATH_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R -E \
+    'kubernetes-dashboard-amd64:v1\.8\.3|k8s-dns-(kube-dns|dnsmasq-nanny|sidecar)-amd64:1\.14\.13|heapster-(grafana-amd64:v4\.4\.3|amd64:v1\.5\.4|influxdb-amd64:v1\.3\.3)' \
+    package addon-templates README.md SECURITY.md COMPATIBILITY.md RELEASE.md; then
+    echo "KUBERNETES_PACKAGE_OBSOLETE_ADDON_IMAGE_PRESENT" >&2
+    exit 1
+fi
+
+if grep -R --exclude=validate -E \
+    '1\.26\.8|KUBEDNS_IMAGE|DNSMASQ_IMAGE|DNS_SIDECAR_IMAGE|k8s-dns-(kube-dns|dnsmasq-nanny|sidecar)' \
+    package addon-templates dns-image scripts README.md SECURITY.md COMPATIBILITY.md RELEASE.md ORIGIN.md \
+    .github/workflows/security-release-gate.yml; then
+    echo "KUBERNETES_PACKAGE_OBSOLETE_DNS_TRIO_PRESENT" >&2
+    exit 1
+fi
+
+if grep -Eq '^[[:space:]]*kind:[[:space:]]+ClusterRole(Binding)?[[:space:]]*$' \
+    addon-templates/kubectl/dns/kubedns-rbac.yaml; then
+    echo "KUBERNETES_PACKAGE_CUSTOM_DNS_CLUSTER_ROLE_PRESENT" >&2
+    exit 1
+fi
+
+if grep -Eq '^[[:space:]]*- name:[[:space:]]+(dnsmasq|sidecar)[[:space:]]*$' \
+    addon-templates/kubectl/dns/kubedns-controller.yaml.sed; then
+    echo "KUBERNETES_PACKAGE_LEGACY_DNS_CONTAINER_PRESENT" >&2
+    exit 1
+fi
+
+if find addon-templates/kubectl/dashboard addon-templates/kubectl/heapster -type f \
+    -print -quit 2>/dev/null | grep -q .; then
+    echo "KUBERNETES_PACKAGE_OBSOLETE_ADDON_TEMPLATE_PRESENT" >&2
+    exit 1
+fi
+
+if grep -Eq '^[[:space:]]*kubectl[^\n]*replace[[:space:]]+--force' package/addons-update.sh || \
+    grep -Eq 'kubectl[^\n]*(delete|replace)[^\n]*(dashboard|heapster|grafana|influxdb)' \
+      package/addons-update.sh || \
+    grep -R -Eq 'name:[[:space:]]+cluster-admin|name:[[:space:]]+addons-binding' \
+      addon-templates package/addons-update.sh; then
+    echo "KUBERNETES_PACKAGE_UNSAFE_ADDON_MUTATION_PRESENT" >&2
+    exit 1
+fi
+
+for forbidden_verb in bind escalate impersonate deletecollection approve sign; do
+    if grep -Eq "^[[:space:]]+- ${forbidden_verb}$" addon-templates/kubectl/helm/tiller-rbac.yaml; then
+        echo "KUBERNETES_PACKAGE_TILLER_FORBIDDEN_RBAC_VERB verb=${forbidden_verb}" >&2
+        exit 1
+    fi
+done
+
+if grep -R -E 'ghcr\.io/[[:alnum:]_.-]+/rc16|github\.com/[[:alnum:]_.-]+/rancher-1\.6-' \
+    README.md RELEASE.md Dockerfile.dapper package scripts patches addon-templates; then
+    echo "KUBERNETES_PACKAGE_PRIVATE_STAGING_REFERENCE_PRESENT" >&2
+    exit 1
+fi
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git diff --check
+fi
+bash tests/test-tiller-upgrade.sh
+bash tests/test-tiller-release-backup.sh
+bash tests/test-addon-upgrade.sh
+bash tests/test-release-gate.sh
+echo "KUBERNETES_PACKAGE_MIGRATION_VALIDATION_OK"

@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+reviewed_cves=${1:-"${repo_root}/security/dapper-linux-libc-dev-reviewed-cves.txt"}
+
+. "${repo_root}/package/ubuntu-apt.lock"
+
+if grep -Evq '^CVE-[0-9]{4}-[0-9]{4,}$' "${reviewed_cves}"; then
+    echo "KUBERNETES_PACKAGE_DAPPER_VEX_INVALID_CVE" >&2
+    exit 1
+fi
+
+if ! LC_ALL=C sort -cu "${reviewed_cves}"; then
+    echo "KUBERNETES_PACKAGE_DAPPER_VEX_CVES_NOT_SORTED_UNIQUE" >&2
+    exit 1
+fi
+
+product="pkg:deb/ubuntu/linux-libc-dev@${UBUNTU_APT_LINUX_LIBC_DEV_VERSION}?arch=amd64&distro=ubuntu-26.04"
+
+jq -Rn \
+    --arg document_id "https://github.com/PastureStack/kubernetes-package/security/dapper-openvex/v1.12.11" \
+    --arg product "${product}" \
+    --arg impact "The exact Dapper package is restricted to development headers under /usr/include and documentation under /usr/share/doc/linux-libc-dev, with no executable file. The finding describes Linux kernel runtime code; this build image contains no Ubuntu kernel binary or module and cannot execute the affected code." \
+    '{
+      "@context": "https://openvex.dev/ns/v0.2.0",
+      "@id": $document_id,
+      "author": "PastureStack Security",
+      "timestamp": "2026-08-08T18:15:00Z",
+      "version": 1,
+      "statements": [
+        inputs | {
+          "vulnerability": {"name": .},
+          "products": [{"@id": $product}],
+          "status": "not_affected",
+          "justification": "vulnerable_code_not_in_execute_path",
+          "impact_statement": $impact
+        }
+      ]
+    }' < "${reviewed_cves}"

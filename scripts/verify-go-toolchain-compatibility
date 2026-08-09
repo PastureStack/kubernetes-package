@@ -1,0 +1,58 @@
+#!/bin/bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+go_version=${GO_VERSION:-1.26.5}
+go_linux_amd64_sha256=${GO_LINUX_AMD64_SHA256:-5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053}
+kubernetes_source_commit=71fde6aadce8b92456b88ee56c21e500f4919f0b
+build_root=$(mktemp -d /tmp/pasturestack-kubernetes-go-compat.XXXXXX)
+
+cleanup() {
+    case "${build_root}" in
+        /tmp/pasturestack-kubernetes-go-compat.*)
+            rm -rf -- "${build_root}"
+            ;;
+        *)
+            echo "refusing to remove unexpected build path: ${build_root}" >&2
+            ;;
+    esac
+}
+trap cleanup EXIT
+
+if ! command -v go >/dev/null 2>&1 ||
+    ! go version | grep -Fq "go${go_version} linux/amd64"; then
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+        --connect-timeout 10 --max-time 300 \
+        -o "${build_root}/go.tgz" \
+        "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz"
+    echo "${go_linux_amd64_sha256}  ${build_root}/go.tgz" | sha256sum -c -
+    tar -C "${build_root}" -xzf "${build_root}/go.tgz"
+    export PATH="${build_root}/go/bin:${PATH}"
+fi
+
+go version | grep -F "go${go_version} linux/amd64"
+
+git clone --quiet --filter=blob:none --no-checkout \
+    https://github.com/kubernetes/kubernetes.git \
+    "${build_root}/source"
+git -C "${build_root}/source" fetch --quiet --depth 1 origin \
+    "${kubernetes_source_commit}"
+git -C "${build_root}/source" checkout --quiet --detach FETCH_HEAD
+
+patch --directory="${build_root}/source" --batch --forward --fuzz=0 -p1 \
+    < "${repo_root}/patches/kubernetes-v1.12.10-docker29-cgroupv2.patch"
+patch --directory="${build_root}/source" --batch --forward --fuzz=0 -p1 \
+    < "${repo_root}/patches/kubernetes-v1.12.10-go1.26.patch"
+
+(
+    cd "${build_root}/source"
+    GO111MODULE=off \
+    GOTOOLCHAIN=local \
+    KUBE_FASTBUILD=true \
+    KUBE_BUILD_PLATFORMS=linux/amd64 \
+        make WHAT=cmd/kubelet
+)
+
+test -x "${build_root}/source/_output/local/bin/linux/amd64/kubelet"
+"${build_root}/source/_output/local/bin/linux/amd64/kubelet" --version
+echo "KUBERNETES_PACKAGE_GO_TOOLCHAIN_COMPATIBILITY_OK"

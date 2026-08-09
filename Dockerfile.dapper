@@ -1,32 +1,153 @@
-FROM ubuntu:16.04
-# FROM arm=armhf/ubuntu:16.04
+FROM docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144 AS snapshot-ca-certificates
 
-RUN apt-get update && \
-    apt-get install -y ca-certificates wget git xz-utils && \
-    rm -f /bin/sh && ln -s /bin/bash /bin/sh
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
 
-ARG DAPPER_HOST_ARCH
-ENV HOST_ARCH=${DAPPER_HOST_ARCH} ARCH=${DAPPER_HOST_ARCH}
+COPY --from=snapshot-ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY package/ubuntu-apt.lock /licenses/ubuntu-apt.lock
 
+ARG DAPPER_HOST_ARCH=amd64
+ARG DOCKER_VERSION=29.6.2
+ARG DOCKER_LINUX_AMD64_SHA256=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74
+ARG KUBERNETES_SOURCE_VERSION=v1.12.10
+ARG KUBERNETES_SOURCE_COMMIT=71fde6aadce8b92456b88ee56c21e500f4919f0b
+ARG KUBERNETES_SOURCE_REPOSITORY_ID=43760763
+ARG KUBERNETES_SERVER_RELEASE_ASSET_ID=14729275
+ARG KUBERNETES_SERVER_SHA256=f3df06f9bf2e4c4e8b5aba16d44197e26672aa06e8c24ab9f6ab4eaf64ab068e
+ARG GO_VERSION=1.26.5
+ARG GO_LINUX_AMD64_SHA256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
+ARG CNI_VERSION=v1.9.1
+ARG CNI_SOURCE_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
+ARG CNI_SOURCE_DATE_EPOCH=1771500712
+ARG CNI_SOURCE_ARCHIVE_SHA256=3b723ab805f716f03820dfeee4289181d9ade76a34d628f9bb36120e44fe767e
+ARG CNI_LICENSE_SHA256=b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1
 
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HOST_ARCH=${DAPPER_HOST_ARCH} \
+    ARCH=${DAPPER_HOST_ARCH} \
+    DOWNLOAD=/usr/src \
+    KUBERNETES_SOURCE_VERSION=${KUBERNETES_SOURCE_VERSION} \
+    KUBERNETES_SOURCE_COMMIT=${KUBERNETES_SOURCE_COMMIT} \
+    KUBERNETES_SERVER_SHA256=${KUBERNETES_SERVER_SHA256} \
+    KUBERNETES_DOWNLOAD=https://api.github.com/repositories/${KUBERNETES_SOURCE_REPOSITORY_ID}/releases/assets/${KUBERNETES_SERVER_RELEASE_ASSET_ID} \
+    CNI_VERSION=${CNI_VERSION} \
+    CNI_SOURCE_COMMIT=${CNI_SOURCE_COMMIT} \
+    CNI_SOURCE_DATE_EPOCH=${CNI_SOURCE_DATE_EPOCH} \
+    CNI_SOURCE_ARCHIVE_SHA256=${CNI_SOURCE_ARCHIVE_SHA256} \
+    CNI_LICENSE_SHA256=${CNI_LICENSE_SHA256} \
+    PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    SHELL=/bin/bash
 
-ENV DOCKER_URL_amd64=https://get.docker.com/builds/Linux/x86_64/docker-1.10.3 \
-    DOCKER_URL_arm=https://github.com/rancher/docker/releases/download/v1.10.3-ros1/docker-1.10.3_arm \
-    DOCKER_URL=DOCKER_URL_${ARCH}
-RUN wget -O - ${!DOCKER_URL} > /usr/bin/docker && chmod +x /usr/bin/docker
+# A checksum-locked donor supplies only the initial CA bundle. Every Ubuntu
+# package is then resolved from one signed snapshot and installed at an exact
+# reviewed direct-package version.
+RUN set -eux; \
+    . /licenses/ubuntu-apt.lock; \
+    find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
+        -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+        -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' {} +; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\nAcquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\nAcquire::AllowInsecureRepositories "false";\nAPT::Get::AllowUnauthenticated "false";\n' > /etc/apt/apt.conf.d/80pasturestack-retries; \
+    apt-get --snapshot "${UBUNTU_APT_SNAPSHOT}" update; \
+    apt-get --snapshot "${UBUNTU_APT_SNAPSHOT}" install -y --no-install-recommends \
+        bash="${UBUNTU_APT_BASH_VERSION}" \
+        build-essential="${UBUNTU_APT_BUILD_ESSENTIAL_VERSION}" \
+        ca-certificates="${UBUNTU_APT_CA_CERTIFICATES_VERSION}" \
+        curl="${UBUNTU_APT_CURL_VERSION}" \
+        gcc="${UBUNTU_APT_GCC_VERSION}" \
+        git="${UBUNTU_APT_GIT_VERSION}" \
+        jq="${UBUNTU_APT_JQ_VERSION}" \
+        libc6-dev="${UBUNTU_APT_LIBC6_DEV_VERSION}" \
+        linux-libc-dev="${UBUNTU_APT_LINUX_LIBC_DEV_VERSION}" \
+        make="${UBUNTU_APT_MAKE_VERSION}" \
+        patch="${UBUNTU_APT_PATCH_VERSION}" \
+        rsync="${UBUNTU_APT_RSYNC_VERSION}" \
+        tar="${UBUNTU_APT_TAR_VERSION}" \
+        xz-utils="${UBUNTU_APT_XZ_UTILS_VERSION}"; \
+    { \
+        printf 'snapshot\t%s\n' "${UBUNTU_APT_SNAPSHOT}"; \
+        dpkg-query -W -f='${binary:Package}\t${Version}\n' | LC_ALL=C sort; \
+    } > /licenses/DAPPER-UBUNTU-APT-PACKAGES.tsv; \
+    test "$(dpkg-query -W -f='${Version}' linux-libc-dev)" = "${UBUNTU_APT_LINUX_LIBC_DEV_VERSION}"; \
+    dpkg-query -L linux-libc-dev | LC_ALL=C sort -u > /licenses/DAPPER-LINUX-LIBC-DEV-FILES.txt; \
+    while IFS= read -r package_path; do \
+        case "${package_path}" in \
+            /.|/usr|/usr/include|/usr/include/*|/usr/share|/usr/share/doc|/usr/share/doc/linux-libc-dev|/usr/share/doc/linux-libc-dev/*) ;; \
+            *) echo "unexpected linux-libc-dev path: ${package_path}" >&2; exit 1 ;; \
+        esac; \
+    done < /licenses/DAPPER-LINUX-LIBC-DEV-FILES.txt; \
+    test -z "$(find /usr/include -type f -perm /111 -print -quit)"; \
+    test "${DAPPER_HOST_ARCH}" = "amd64"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 300 \
+        -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
+    echo "${GO_LINUX_AMD64_SHA256}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    go version | grep -F "go${GO_VERSION} linux/amd64"; \
+    rm -f /tmp/go.tgz; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    rm -f /usr/bin/pebble; \
+    rm -f /bin/sh; \
+    ln -s /bin/bash /bin/sh
 
+# Rebuild the single shipped CNI plug-in from the immutable upstream source
+# commit.  The upstream prebuilt archive is deliberately not inherited because
+# its embedded Go toolchain is older than the reviewed security baseline.
+RUN set -eux; \
+    cni_source=/tmp/cni-source; \
+    cni_modcache=/tmp/cni-modcache; \
+    cni_gocache=/tmp/cni-gocache; \
+    mkdir -p "${cni_source}" "${cni_modcache}" "${cni_gocache}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 300 \
+        -o /tmp/cni-source.tgz \
+        "https://codeload.github.com/containernetworking/plugins/tar.gz/${CNI_SOURCE_COMMIT}"; \
+    echo "${CNI_SOURCE_ARCHIVE_SHA256}  /tmp/cni-source.tgz" | sha256sum -c -; \
+    tar xzf /tmp/cni-source.tgz -C "${cni_source}" --strip-components=1; \
+    echo "${CNI_LICENSE_SHA256}  ${cni_source}/LICENSE" | sha256sum -c -; \
+    cd "${cni_source}"; \
+    export CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local; \
+    export GOPROXY=off GOSUMDB=off; \
+    export GOMODCACHE="${cni_modcache}" GOCACHE="${cni_gocache}"; \
+    export SOURCE_DATE_EPOCH="${CNI_SOURCE_DATE_EPOCH}"; \
+    go test -c -mod=vendor -o /tmp/cni-loopback-tests ./plugins/main/loopback; \
+    for pass in first second; do \
+        go build -trimpath -buildvcs=false -mod=vendor \
+            -ldflags "-s -w -buildid= -X github.com/containernetworking/plugins/pkg/utils/buildversion.BuildVersion=${CNI_VERSION}" \
+            -o "/tmp/cni-loopback.${pass}" ./plugins/main/loopback; \
+    done; \
+    cmp /tmp/cni-loopback.first /tmp/cni-loopback.second; \
+    install -m 0755 /tmp/cni-loopback.first /usr/src/cni-loopback; \
+    install -m 0644 LICENSE /usr/src/CNI-LICENSE; \
+    go version -m /usr/src/cni-loopback > /licenses/CNI-LOOPBACK-GO-VERSION.txt; \
+    /usr/src/cni-loopback > /licenses/CNI-LOOPBACK-VERSION.txt 2>&1; \
+    grep -F "go${GO_VERSION}" /licenses/CNI-LOOPBACK-GO-VERSION.txt; \
+    grep -F "CNI loopback plugin ${CNI_VERSION}" /licenses/CNI-LOOPBACK-VERSION.txt; \
+    rm -rf /tmp/cni-source /tmp/cni-modcache /tmp/cni-gocache \
+        /tmp/cni-source.tgz /tmp/cni-loopback.first /tmp/cni-loopback.second \
+        /tmp/cni-loopback-tests
 
+RUN set -eux; \
+    case "${DAPPER_HOST_ARCH}" in \
+        amd64) docker_arch=x86_64; docker_sha="${DOCKER_LINUX_AMD64_SHA256}" ;; \
+        *) echo "unsupported DAPPER_HOST_ARCH=${DAPPER_HOST_ARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 300 \
+        -o /tmp/docker.tgz "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
+    echo "${docker_sha}  /tmp/docker.tgz" | sha256sum -c -; \
+    tar xzf /tmp/docker.tgz -C /usr/bin --strip-components=1 docker/docker; \
+    rm -f /tmp/docker.tgz; \
+    chmod +x /usr/bin/docker; \
+    mkdir -p "${DOWNLOAD}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 600 \
+        -H 'Accept: application/octet-stream' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        -o "${DOWNLOAD}/k8s.tar.gz" "${KUBERNETES_DOWNLOAD}"; \
+    echo "${KUBERNETES_SERVER_SHA256}  ${DOWNLOAD}/k8s.tar.gz" | sha256sum -c -; \
+    docker --version
 
-ENV DOWNLOAD /usr/src
-
-ENV KUBERNETES_DOWNLOAD https://github.com/rancher/kubernetes/releases/download/v1.12.7-rancher1/kubernetes-server-linux-amd64.tar.gz
-RUN wget -O - $KUBERNETES_DOWNLOAD > $DOWNLOAD/k8s.tar.gz
-
-ENV DAPPER_ENV REPO TAG
-ENV DAPPER_SOURCE /source
-ENV DAPPER_OUTPUT ./dist
-ENV DAPPER_DOCKER_SOCKET true
-ENV TRASH_CACHE ${DAPPER_SOURCE}/.trash-cache
+ENV DAPPER_ENV="REPO TAG IMAGE_NAME IMAGE KUBERNETES_BINARY_VERSION"
+ENV DAPPER_SOURCE=/source
+ENV DAPPER_OUTPUT=./dist
+ENV DAPPER_DOCKER_SOCKET=true
+ENV TRASH_CACHE=${DAPPER_SOURCE}/.trash-cache
 WORKDIR ${DAPPER_SOURCE}
 
 ENTRYPOINT ["./scripts/entry"]

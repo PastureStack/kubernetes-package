@@ -1,0 +1,36 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly source_revision='c3ddef3eb784fd06be17fd056acc79f2a6d709ce'
+readonly source_archive_url="https://codeload.github.com/kubernetes/dns/tar.gz/${source_revision}"
+readonly source_archive_sha256='1d4cb1dafc6b6c0456b3073ae88d5e3991835677ae04fae130f045f0613b4948'
+readonly source_license_sha256='b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1'
+
+destination=${1:?usage: prepare-cluster-dns-source DESTINATION}
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+
+if [ -e "$destination" ]; then
+    echo "destination already exists: $destination" >&2
+    exit 1
+fi
+
+mkdir -p "$destination"
+archive=$(mktemp "${TMPDIR:-/tmp}/pasturestack-cluster-dns.XXXXXX.tar.gz")
+trap 'rm -f "$archive"' EXIT
+curl --fail --location --silent --show-error --retry 5 --retry-all-errors \
+    "$source_archive_url" --output "$archive"
+printf '%s  %s\n' "$source_archive_sha256" "$archive" | sha256sum --check --status
+tar --extract --gzip --file "$archive" --strip-components=1 --directory "$destination"
+printf '%s  %s\n' "$source_license_sha256" "$destination/LICENSE" | sha256sum --check --status
+
+patch_file="$repo_root/patches/kubernetes-dns-1.26.9-cluster-only.patch"
+patch --batch --forward --fuzz=0 --dry-run --directory "$destination" --strip=1 < "$patch_file"
+patch --batch --forward --fuzz=0 --directory "$destination" --strip=1 < "$patch_file"
+
+test -z "$(grep -R -l 'github.com/coredns/coredns/plugin/pkg/parse' \
+    "$destination/pkg/dns/config" || true)"
+test -z "$(grep -R -l 'validateForwardProxy' \
+    "$destination/pkg/dns/config" || true)"
+printf '%s\n' "$source_revision" > "$destination/PASTURESTACK_SOURCE_REVISION"
+
+echo "CLUSTER_DNS_SOURCE_READY revision=$source_revision"

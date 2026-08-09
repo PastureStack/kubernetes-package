@@ -1,0 +1,1171 @@
+diff --git a/pkg/kubelet/cm/container_manager_linux.go b/pkg/kubelet/cm/container_manager_linux.go
+index 132e2de9abe9c7cfd6a477251b94c1e0b1272adc..a966d50762041082f6ed83a90cba50427a12f348 100644
+--- a/pkg/kubelet/cm/container_manager_linux.go
++++ b/pkg/kubelet/cm/container_manager_linux.go
+@@ -153,6 +153,14 @@ func validateSystemRequirements(mountUtil mount.Interface) (features, error) {
+ 		cpuMountPoint string
+ 		f             features
+ 	)
++	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
++		// The v1.12 container manager cannot create its historical per-QoS
++		// hierarchy on cgroup v2.  The compatibility profile disables that
++		// hierarchy and delegates container limits to the Docker runtime.
++		_, periodErr := os.Stat("/sys/fs/cgroup/cpu.max")
++		f.cpuHardcapping = periodErr == nil
++		return f, nil
++	}
+ 	mountPoints, err := mountUtil.List()
+ 	if err != nil {
+ 		return f, fmt.Errorf("%s - %v", localErr, err)
+diff --git a/pkg/kubelet/cm/helpers_linux.go b/pkg/kubelet/cm/helpers_linux.go
+index 64b12854971437aebfbcb1694cca3dc59d2bea8e..b50e76b78622fb3f3d35c3501ebe4f10b4ea49bc 100644
+--- a/pkg/kubelet/cm/helpers_linux.go
++++ b/pkg/kubelet/cm/helpers_linux.go
+@@ -186,10 +186,21 @@ func GetCgroupSubsystems() (*CgroupSubsystems, error) {
+ 	// get all cgroup mounts.
+ 	allCgroups, err := libcontainercgroups.GetCgroupMounts(true)
+ 	if err != nil {
+-		return &CgroupSubsystems{}, err
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return &CgroupSubsystems{}, err
++		}
+ 	}
+ 	if len(allCgroups) == 0 {
+-		return &CgroupSubsystems{}, fmt.Errorf("failed to find cgroup mounts")
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return &CgroupSubsystems{}, fmt.Errorf("failed to find cgroup mounts")
++		}
++
++		subsystems := []string{"cpu", "cpuacct", "cpuset", "memory", "blkio", "devices"}
++		allCgroups = []libcontainercgroups.Mount{{
++			Mountpoint: "/sys/fs/cgroup",
++			Root:       "/",
++			Subsystems: subsystems,
++		}}
+ 	}
+ 	mountPoints := make(map[string]string, len(allCgroups))
+ 	for _, mount := range allCgroups {
+diff --git a/pkg/kubelet/dockershim/docker_sandbox.go b/pkg/kubelet/dockershim/docker_sandbox.go
+index b114bf052b4681b5d179c290da6f0acc909ff917..6bf3cb4cc15efd3bb8a9187e991226126089ab4d 100644
+--- a/pkg/kubelet/dockershim/docker_sandbox.go
++++ b/pkg/kubelet/dockershim/docker_sandbox.go
+@@ -546,6 +546,10 @@ func (ds *dockerService) applySandboxLinuxOptions(hc *dockercontainer.HostConfig
+ 	if lc == nil {
+ 		return nil
+ 	}
++	// Modern Docker daemons require an IPC namespace donor to be explicitly
++	// shareable. Workload containers join the pod sandbox's IPC namespace.
++	hc.IpcMode = dockercontainer.IpcMode("shareable")
++
+ 	// Apply security context.
+ 	if err := applySandboxSecurityContext(lc, createConfig.Config, hc, ds.network, separator); err != nil {
+ 		return err
+diff --git a/vendor/github.com/docker/docker/api/common.go b/vendor/github.com/docker/docker/api/common.go
+index 2879a110c10f3a4e19d70da3a9d33cd77dcb327d..d01d90630391b58c06ffd463d623ba6c60c15f00 100644
+--- a/vendor/github.com/docker/docker/api/common.go
++++ b/vendor/github.com/docker/docker/api/common.go
+@@ -3,7 +3,10 @@ package api
+ // Common constants for daemon and client.
+ const (
+ 	// DefaultVersion of Current REST API
+-	DefaultVersion = "1.38"
++	// Docker Engine 29 rejects clients older than API 1.40. Keep the oldest
++	// API accepted by that daemon so this legacy kubelet can still negotiate
++	// down when it connects to an older supported Engine.
++	DefaultVersion = "1.40"
+ 
+ 	// NoBaseImageSpecifier is the symbol used by the FROM
+ 	// command to specify that no base image is to be used.
+diff --git a/vendor/github.com/google/cadvisor/container/common/helpers.go b/vendor/github.com/google/cadvisor/container/common/helpers.go
+index f5539b5d1ac9f1d650bb2fb1db0c3730263b1501..95814a345c57feefc42e53b1750bdfbbb4286c4e 100644
+--- a/vendor/github.com/google/cadvisor/container/common/helpers.go
++++ b/vendor/github.com/google/cadvisor/container/common/helpers.go
+@@ -72,6 +72,9 @@ func GetSpec(cgroupPaths map[string]string, machineInfoFactory info.MachineInfoF
+ 	if err != nil {
+ 		return spec, err
+ 	}
++	if unifiedPath, ok := getUnifiedCgroupV2Path(cgroupPaths); ok {
++		return getCgroupV2Spec(unifiedPath, mi, hasNetwork, hasFilesystem), nil
++	}
+ 
+ 	// CPU.
+ 	cpuRoot, ok := cgroupPaths["cpu"]
+@@ -124,6 +127,94 @@ func GetSpec(cgroupPaths map[string]string, machineInfoFactory info.MachineInfoF
+ 	return spec, nil
+ }
+ 
++func getUnifiedCgroupV2Path(cgroupPaths map[string]string) (string, bool) {
++	for _, subsystem := range []string{"memory", "cpu", "cpuset", "blkio", "devices"} {
++		cgroupPath, ok := cgroupPaths[subsystem]
++		if ok && utils.FileExists(path.Join(cgroupPath, "cgroup.controllers")) {
++			return cgroupPath, true
++		}
++	}
++	for _, cgroupPath := range cgroupPaths {
++		if utils.FileExists(path.Join(cgroupPath, "cgroup.controllers")) {
++			return cgroupPath, true
++		}
++	}
++	return "", false
++}
++
++func readCgroupV2Limit(dirpath, file string, unlimited uint64) uint64 {
++	value := readString(dirpath, file)
++	if value == "max" {
++		return unlimited
++	}
++	if value == "" {
++		return unlimited
++	}
++	parsed, err := strconv.ParseUint(value, 10, 64)
++	if err != nil {
++		glog.Errorf("GetSpec: Failed to parse cgroup v2 limit from %q: %s", path.Join(dirpath, file), err)
++		return 0
++	}
++	return parsed
++}
++
++func cpuWeightToShares(weight uint64) uint64 {
++	if weight < 1 {
++		return 0
++	}
++	if weight > 10000 {
++		weight = 10000
++	}
++	return 2 + ((weight - 1) * 262142 / 9999)
++}
++
++func getCgroupV2Spec(cgroupPath string, mi *info.MachineInfo, hasNetwork, hasFilesystem bool) info.ContainerSpec {
++	var spec info.ContainerSpec
++	unlimited := ^uint64(0)
++	if fi, err := os.Stat(cgroupPath); err == nil {
++		spec.CreationTime = fi.ModTime()
++	}
++
++	if utils.FileExists(path.Join(cgroupPath, "cpu.stat")) {
++		spec.HasCpu = true
++		spec.Cpu.Limit = cpuWeightToShares(readUInt64(cgroupPath, "cpu.weight"))
++		fields := strings.Fields(readString(cgroupPath, "cpu.max"))
++		if len(fields) == 2 {
++			spec.Cpu.Period, _ = strconv.ParseUint(fields[1], 10, 64)
++			if fields[0] != "max" {
++				spec.Cpu.Quota, _ = strconv.ParseUint(fields[0], 10, 64)
++			}
++		}
++	}
++	if utils.FileExists(path.Join(cgroupPath, "cpuset.cpus.effective")) || utils.FileExists(path.Join(cgroupPath, "cpuset.cpus")) {
++		spec.HasCpu = true
++		mask := readString(cgroupPath, "cpuset.cpus.effective")
++		if mask == "" {
++			mask = readString(cgroupPath, "cpuset.cpus")
++		}
++		spec.Cpu.Mask = utils.FixCpuMask(mask, mi.NumCores)
++	}
++
++	if utils.FileExists(path.Join(cgroupPath, "memory.stat")) {
++		spec.HasMemory = true
++		spec.Memory.Limit = readCgroupV2Limit(cgroupPath, "memory.max", unlimited)
++		swapLimit := readCgroupV2Limit(cgroupPath, "memory.swap.max", unlimited)
++		if spec.Memory.Limit == unlimited || swapLimit == unlimited {
++			spec.Memory.SwapLimit = unlimited
++		} else if unlimited-spec.Memory.Limit < swapLimit {
++			spec.Memory.SwapLimit = unlimited
++		} else {
++			spec.Memory.SwapLimit = spec.Memory.Limit + swapLimit
++		}
++		spec.Memory.Reservation = readCgroupV2Limit(cgroupPath, "memory.low", 0)
++	}
++
++	spec.HasNetwork = hasNetwork
++	spec.HasFilesystem = hasFilesystem
++	spec.HasDiskIo = utils.FileExists(path.Join(cgroupPath, "io.stat"))
++	return spec
++}
++
+ func readString(dirpath string, file string) string {
+ 	cgroupFile := path.Join(dirpath, file)
+ 
+diff --git a/vendor/github.com/google/cadvisor/container/common/helpers_cgroupv2_test.go b/vendor/github.com/google/cadvisor/container/common/helpers_cgroupv2_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c578851aed588d9923fbe934181fc22f7b579497
+--- /dev/null
++++ b/vendor/github.com/google/cadvisor/container/common/helpers_cgroupv2_test.go
+@@ -0,0 +1,98 @@
++// Copyright 2026 PastureStack contributors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++
++package common
++
++import (
++	"io/ioutil"
++	"os"
++	"path/filepath"
++	"testing"
++
++	info "github.com/google/cadvisor/info/v1"
++)
++
++type cgroupV2MachineInfoFactory struct {
++	machine *info.MachineInfo
++}
++
++func (f *cgroupV2MachineInfoFactory) GetMachineInfo() (*info.MachineInfo, error) {
++	return f.machine, nil
++}
++
++func (f *cgroupV2MachineInfoFactory) GetVersionInfo() (*info.VersionInfo, error) {
++	return &info.VersionInfo{}, nil
++}
++
++func writeCgroupV2Fixture(t *testing.T, dir, name, contents string) {
++	if err := ioutil.WriteFile(filepath.Join(dir, name), []byte(contents), 0600); err != nil {
++		t.Fatalf("write %s: %v", name, err)
++	}
++}
++
++func newCgroupV2Fixture(t *testing.T) string {
++	dir, err := ioutil.TempDir("", "cadvisor-common-cgroupv2-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	writeCgroupV2Fixture(t, dir, "cgroup.controllers", "cpu cpuset io memory\n")
++	return dir
++}
++
++func TestGetSpecReadsUnifiedCgroupV2Limits(t *testing.T) {
++	dir := newCgroupV2Fixture(t)
++	defer os.RemoveAll(dir)
++
++	writeCgroupV2Fixture(t, dir, "cpu.stat", "usage_usec 1\n")
++	writeCgroupV2Fixture(t, dir, "cpu.weight", "100\n")
++	writeCgroupV2Fixture(t, dir, "cpu.max", "200000 100000\n")
++	writeCgroupV2Fixture(t, dir, "cpuset.cpus.effective", "0-3\n")
++	writeCgroupV2Fixture(t, dir, "memory.stat", "anon 1\n")
++	writeCgroupV2Fixture(t, dir, "memory.max", "1073741824\n")
++	writeCgroupV2Fixture(t, dir, "memory.swap.max", "536870912\n")
++	writeCgroupV2Fixture(t, dir, "memory.low", "134217728\n")
++	writeCgroupV2Fixture(t, dir, "io.stat", "8:0 rbytes=1\n")
++
++	spec, err := GetSpec(map[string]string{"cpu": dir}, &cgroupV2MachineInfoFactory{
++		machine: &info.MachineInfo{NumCores: 4},
++	}, true, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !spec.HasCpu || spec.Cpu.Limit != 2597 || spec.Cpu.Quota != 200000 || spec.Cpu.Period != 100000 || spec.Cpu.Mask != "0-3" {
++		t.Fatalf("unexpected CPU spec: %#v", spec.Cpu)
++	}
++	if !spec.HasMemory || spec.Memory.Limit != 1073741824 || spec.Memory.SwapLimit != 1610612736 || spec.Memory.Reservation != 134217728 {
++		t.Fatalf("unexpected memory spec: %#v", spec.Memory)
++	}
++	if !spec.HasDiskIo || !spec.HasNetwork || !spec.HasFilesystem {
++		t.Fatalf("unexpected capabilities: %#v", spec)
++	}
++}
++
++func TestGetSpecTreatsMissingRootLimitsAsUnlimited(t *testing.T) {
++	dir := newCgroupV2Fixture(t)
++	defer os.RemoveAll(dir)
++
++	writeCgroupV2Fixture(t, dir, "cpu.stat", "usage_usec 1\n")
++	writeCgroupV2Fixture(t, dir, "memory.stat", "anon 1\n")
++
++	spec, err := GetSpec(map[string]string{"memory": dir}, &cgroupV2MachineInfoFactory{
++		machine: &info.MachineInfo{NumCores: 2},
++	}, false, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	unlimited := ^uint64(0)
++	if spec.Memory.Limit != unlimited || spec.Memory.SwapLimit != unlimited {
++		t.Fatalf("missing root limits must be unlimited, got %#v", spec.Memory)
++	}
++	if spec.Memory.Reservation != 0 {
++		t.Fatalf("missing memory.low must remain zero, got %d", spec.Memory.Reservation)
++	}
++}
+diff --git a/vendor/github.com/google/cadvisor/container/docker/factory.go b/vendor/github.com/google/cadvisor/container/docker/factory.go
+index 9f544ee8cc5f5baedd521f24c7f21fbf67a2e6d0..7845fad6ebeae28a2c34410f4643e692dbbb9b04 100644
+--- a/vendor/github.com/google/cadvisor/container/docker/factory.go
++++ b/vendor/github.com/google/cadvisor/container/docker/factory.go
+@@ -97,6 +97,9 @@ type dockerFactory struct {
+ 
+ 	storageDriver storageDriver
+ 	storageDir    string
++	// Docker 25 and later can store writable layers in containerd instead of
++	// the historical graphdriver layerdb below DockerRootDir.
++	containerdSnapshotter bool
+ 
+ 	client *docker.Client
+ 
+@@ -137,6 +140,7 @@ func (self *dockerFactory) NewContainerHandler(name string, inHostNamespace bool
+ 		self.fsInfo,
+ 		self.storageDriver,
+ 		self.storageDir,
++		self.containerdSnapshotter,
+ 		&self.cgroupSubsystems,
+ 		inHostNamespace,
+ 		metadataEnvs,
+@@ -149,6 +153,18 @@ func (self *dockerFactory) NewContainerHandler(name string, inHostNamespace bool
+ 	return
+ }
+ 
++func usesContainerdSnapshotter(dockerInfo *dockertypes.Info) bool {
++	if dockerInfo == nil {
++		return false
++	}
++	for _, entry := range dockerInfo.DriverStatus {
++		if entry[0] == "driver-type" && entry[1] == "io.containerd.snapshotter.v1" {
++			return true
++		}
++	}
++	return false
++}
++
+ // Returns the Docker ID from the full container name.
+ func ContainerNameToDockerId(name string) string {
+ 	id := path.Base(name)
+@@ -353,20 +369,25 @@ func Register(factory info.MachineInfoFactory, fsInfo fs.FsInfo, includedMetrics
+ 		}
+ 	}
+ 
++	containerdSnapshotter := usesContainerdSnapshotter(dockerInfo)
++	if containerdSnapshotter {
++		glog.Infof("Docker uses the containerd snapshotter; collecting writable-layer usage through the Docker API")
++	}
+ 	glog.V(1).Infof("Registering Docker factory")
+ 	f := &dockerFactory{
+-		cgroupSubsystems:   cgroupSubsystems,
+-		client:             client,
+-		dockerVersion:      dockerVersion,
+-		dockerAPIVersion:   dockerAPIVersion,
+-		fsInfo:             fsInfo,
+-		machineInfoFactory: factory,
+-		storageDriver:      storageDriver(dockerInfo.Driver),
+-		storageDir:         RootDir(),
+-		includedMetrics:    includedMetrics,
+-		thinPoolName:       thinPoolName,
+-		thinPoolWatcher:    thinPoolWatcher,
+-		zfsWatcher:         zfsWatcher,
++		cgroupSubsystems:      cgroupSubsystems,
++		client:                client,
++		dockerVersion:         dockerVersion,
++		dockerAPIVersion:      dockerAPIVersion,
++		fsInfo:                fsInfo,
++		machineInfoFactory:    factory,
++		storageDriver:         storageDriver(dockerInfo.Driver),
++		storageDir:            RootDir(),
++		containerdSnapshotter: containerdSnapshotter,
++		includedMetrics:       includedMetrics,
++		thinPoolName:          thinPoolName,
++		thinPoolWatcher:       thinPoolWatcher,
++		zfsWatcher:            zfsWatcher,
+ 	}
+ 
+ 	container.RegisterContainerHandlerFactory(f, []watcher.ContainerWatchSource{watcher.Raw})
+diff --git a/vendor/github.com/google/cadvisor/container/docker/factory_containerd_test.go b/vendor/github.com/google/cadvisor/container/docker/factory_containerd_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7184be14fa06925b2fdd0d0ee4d366abc297a5d
+--- /dev/null
++++ b/vendor/github.com/google/cadvisor/container/docker/factory_containerd_test.go
+@@ -0,0 +1,106 @@
++// Copyright 2026 PastureStack contributors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++
++package docker
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	dockertypes "github.com/docker/docker/api/types"
++	dockerclient "github.com/docker/docker/client"
++	cadvisorfs "github.com/google/cadvisor/fs"
++)
++
++type dockerAPIFsInfo struct {
++	extraUsage uint64
++	extraErr   error
++}
++
++func (f *dockerAPIFsInfo) GetGlobalFsInfo() ([]cadvisorfs.Fs, error) { return nil, nil }
++func (f *dockerAPIFsInfo) GetFsInfoForPath(map[string]struct{}) ([]cadvisorfs.Fs, error) {
++	return nil, nil
++}
++func (f *dockerAPIFsInfo) GetDirDiskUsage(string, time.Duration) (uint64, error) {
++	return f.extraUsage, f.extraErr
++}
++func (f *dockerAPIFsInfo) GetDirInodeUsage(string, time.Duration) (uint64, error) {
++	return 0, nil
++}
++func (f *dockerAPIFsInfo) GetDeviceInfoByFsUUID(string) (*cadvisorfs.DeviceInfo, error) {
++	return nil, cadvisorfs.ErrNoSuchDevice
++}
++func (f *dockerAPIFsInfo) GetDirFsDevice(string) (*cadvisorfs.DeviceInfo, error) {
++	return nil, cadvisorfs.ErrNoSuchDevice
++}
++func (f *dockerAPIFsInfo) GetDeviceForLabel(string) (string, error) {
++	return "", cadvisorfs.ErrNoSuchDevice
++}
++func (f *dockerAPIFsInfo) GetLabelsForDevice(string) ([]string, error) { return nil, nil }
++func (f *dockerAPIFsInfo) GetMountpointForDevice(string) (string, error) {
++	return "", cadvisorfs.ErrNoSuchDevice
++}
++
++func TestUsesContainerdSnapshotter(t *testing.T) {
++	if usesContainerdSnapshotter(nil) {
++		t.Fatal("nil Docker info must not enable containerd snapshotter mode")
++	}
++	legacy := &dockertypes.Info{DriverStatus: [][2]string{{"Backing Filesystem", "extfs"}}}
++	if usesContainerdSnapshotter(legacy) {
++		t.Fatal("legacy graphdriver status must not enable containerd snapshotter mode")
++	}
++	current := &dockertypes.Info{DriverStatus: [][2]string{{"driver-type", "io.containerd.snapshotter.v1"}}}
++	if !usesContainerdSnapshotter(current) {
++		t.Fatal("Docker containerd snapshotter marker was not detected")
++	}
++}
++
++func TestDockerAPIFsHandlerUsesWritableLayerSize(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v1.44/containers/test-container/json" || r.URL.Query().Get("size") != "1" {
++			http.Error(w, "unexpected request", http.StatusBadRequest)
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]interface{}{"SizeRw": int64(4096)})
++	}))
++	defer server.Close()
++
++	client, err := dockerclient.NewClient(server.URL, "1.44", server.Client(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	handler := newDockerAPIFsHandler(client, "test-container", "/logs", &dockerAPIFsInfo{extraUsage: 2048}).(*dockerAPIFsHandler)
++	if err := handler.update(); err != nil {
++		t.Fatal(err)
++	}
++	usage := handler.Usage()
++	if usage.BaseUsageBytes != 4096 || usage.TotalUsageBytes != 6144 {
++		t.Fatalf("unexpected filesystem usage: %#v", usage)
++	}
++}
++
++func TestDockerAPIFsHandlerRejectsMissingWritableLayerSize(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]interface{}{})
++	}))
++	defer server.Close()
++
++	client, err := dockerclient.NewClient(server.URL, "1.44", server.Client(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	handler := newDockerAPIFsHandler(client, "test-container", "/logs", &dockerAPIFsInfo{}).(*dockerAPIFsHandler)
++	if err := handler.update(); err == nil {
++		t.Fatal("missing SizeRw must not be reported as zero usage")
++	}
++}
+diff --git a/vendor/github.com/google/cadvisor/container/docker/handler.go b/vendor/github.com/google/cadvisor/container/docker/handler.go
+index 69f84faf47e26b7f9cfa5285ed292034488b1f55..affd8e3162ac5e15827cc70df99d6647d3bceed2 100644
+--- a/vendor/github.com/google/cadvisor/container/docker/handler.go
++++ b/vendor/github.com/google/cadvisor/container/docker/handler.go
+@@ -21,6 +21,7 @@ import (
+ 	"path"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/google/cadvisor/container"
+@@ -60,9 +61,10 @@ type dockerContainerHandler struct {
+ 	cgroupPaths map[string]string
+ 
+ 	// the docker storage driver
+-	storageDriver    storageDriver
+-	fsInfo           fs.FsInfo
+-	rootfsStorageDir string
++	storageDriver         storageDriver
++	fsInfo                fs.FsInfo
++	rootfsStorageDir      string
++	containerdSnapshotter bool
+ 
+ 	// Time at which this container was created.
+ 	creationTime time.Time
+@@ -124,6 +126,7 @@ func newDockerContainerHandler(
+ 	fsInfo fs.FsInfo,
+ 	storageDriver storageDriver,
+ 	storageDir string,
++	containerdSnapshotter bool,
+ 	cgroupSubsystems *containerlibcontainer.CgroupSubsystems,
+ 	inHostNamespace bool,
+ 	metadataEnvs []string,
+@@ -159,9 +162,13 @@ func newDockerContainerHandler(
+ 	// FIXME: Give `otherStorageDir` a more descriptive name.
+ 	otherStorageDir := path.Join(storageDir, pathToContainersDir, id)
+ 
+-	rwLayerID, err := getRwLayerID(id, storageDir, storageDriver, dockerVersion)
+-	if err != nil {
+-		return nil, err
++	rwLayerID := ""
++	if !containerdSnapshotter {
++		var err error
++		rwLayerID, err = getRwLayerID(id, storageDir, storageDriver, dockerVersion)
++		if err != nil {
++			return nil, err
++		}
+ 	}
+ 
+ 	// Determine the rootfs storage dir OR the pool name to determine the device.
+@@ -171,20 +178,24 @@ func newDockerContainerHandler(
+ 		zfsFilesystem    string
+ 		zfsParent        string
+ 	)
+-	switch storageDriver {
+-	case aufsStorageDriver:
+-		rootfsStorageDir = path.Join(storageDir, string(aufsStorageDriver), aufsRWLayer, rwLayerID)
+-	case overlayStorageDriver:
+-		rootfsStorageDir = path.Join(storageDir, string(storageDriver), rwLayerID, overlayRWLayer)
+-	case overlay2StorageDriver:
+-		rootfsStorageDir = path.Join(storageDir, string(storageDriver), rwLayerID, overlay2RWLayer)
+-	case zfsStorageDriver:
+-		status, err := Status()
+-		if err != nil {
+-			return nil, fmt.Errorf("unable to determine docker status: %v", err)
++	if containerdSnapshotter {
++		rootfsStorageDir = storageDir
++	} else {
++		switch storageDriver {
++		case aufsStorageDriver:
++			rootfsStorageDir = path.Join(storageDir, string(aufsStorageDriver), aufsRWLayer, rwLayerID)
++		case overlayStorageDriver:
++			rootfsStorageDir = path.Join(storageDir, string(storageDriver), rwLayerID, overlayRWLayer)
++		case overlay2StorageDriver:
++			rootfsStorageDir = path.Join(storageDir, string(storageDriver), rwLayerID, overlay2RWLayer)
++		case zfsStorageDriver:
++			status, err := Status()
++			if err != nil {
++				return nil, fmt.Errorf("unable to determine docker status: %v", err)
++			}
++			zfsParent = status.DriverStatus[dockerutil.DriverStatusParentDataset]
++			zfsFilesystem = path.Join(zfsParent, rwLayerID)
+ 		}
+-		zfsParent = status.DriverStatus[dockerutil.DriverStatusParentDataset]
+-		zfsFilesystem = path.Join(zfsParent, rwLayerID)
+ 	}
+ 
+ 	// We assume that if Inspect fails then the container is not known to docker.
+@@ -195,16 +206,17 @@ func newDockerContainerHandler(
+ 
+ 	// TODO: extract object mother method
+ 	handler := &dockerContainerHandler{
+-		machineInfoFactory: machineInfoFactory,
+-		cgroupPaths:        cgroupPaths,
+-		fsInfo:             fsInfo,
+-		storageDriver:      storageDriver,
+-		poolName:           thinPoolName,
+-		rootfsStorageDir:   rootfsStorageDir,
+-		envs:               make(map[string]string),
+-		labels:             ctnr.Config.Labels,
+-		includedMetrics:    includedMetrics,
+-		zfsParent:          zfsParent,
++		machineInfoFactory:    machineInfoFactory,
++		cgroupPaths:           cgroupPaths,
++		fsInfo:                fsInfo,
++		storageDriver:         storageDriver,
++		containerdSnapshotter: containerdSnapshotter,
++		poolName:              thinPoolName,
++		rootfsStorageDir:      rootfsStorageDir,
++		envs:                  make(map[string]string),
++		labels:                ctnr.Config.Labels,
++		includedMetrics:       includedMetrics,
++		zfsParent:             zfsParent,
+ 	}
+ 	// Timestamp returned by Docker is in time.RFC3339Nano format.
+ 	handler.creationTime, err = time.Parse(time.RFC3339Nano, ctnr.Created)
+@@ -245,12 +257,16 @@ func newDockerContainerHandler(
+ 	handler.ipAddress = ipAddress
+ 
+ 	if includedMetrics.Has(container.DiskUsageMetrics) {
+-		handler.fsHandler = &dockerFsHandler{
+-			fsHandler:       common.NewFsHandler(common.DefaultPeriod, rootfsStorageDir, otherStorageDir, fsInfo),
+-			thinPoolWatcher: thinPoolWatcher,
+-			zfsWatcher:      zfsWatcher,
+-			deviceID:        ctnr.GraphDriver.Data["DeviceId"],
+-			zfsFilesystem:   zfsFilesystem,
++		if containerdSnapshotter {
++			handler.fsHandler = newDockerAPIFsHandler(client, id, otherStorageDir, fsInfo)
++		} else {
++			handler.fsHandler = &dockerFsHandler{
++				fsHandler:       common.NewFsHandler(common.DefaultPeriod, rootfsStorageDir, otherStorageDir, fsInfo),
++				thinPoolWatcher: thinPoolWatcher,
++				zfsWatcher:      zfsWatcher,
++				deviceID:        ctnr.GraphDriver.Data["DeviceId"],
++				zfsFilesystem:   zfsFilesystem,
++			}
+ 		}
+ 	}
+ 
+@@ -269,6 +285,84 @@ func newDockerContainerHandler(
+ 	return handler, nil
+ }
+ 
++type dockerAPIFsHandler struct {
++	sync.RWMutex
++	client      *docker.Client
++	containerID string
++	extraDir    string
++	fsInfo      fs.FsInfo
++	usage       common.FsUsage
++	stopChan    chan struct{}
++}
++
++var _ common.FsHandler = &dockerAPIFsHandler{}
++
++func newDockerAPIFsHandler(client *docker.Client, containerID, extraDir string, fsInfo fs.FsInfo) common.FsHandler {
++	return &dockerAPIFsHandler{
++		client:      client,
++		containerID: containerID,
++		extraDir:    extraDir,
++		fsInfo:      fsInfo,
++		stopChan:    make(chan struct{}),
++	}
++}
++
++func (h *dockerAPIFsHandler) update() error {
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
++	defer cancel()
++	containerInfo, _, err := h.client.ContainerInspectWithRaw(ctx, h.containerID, true)
++	if err != nil {
++		return err
++	}
++	if containerInfo.ContainerJSONBase == nil || containerInfo.SizeRw == nil || *containerInfo.SizeRw < 0 {
++		return fmt.Errorf("Docker did not report writable-layer usage for container %q", h.containerID)
++	}
++
++	baseUsage := uint64(*containerInfo.SizeRw)
++	extraUsage, extraErr := h.fsInfo.GetDirDiskUsage(h.extraDir, 2*time.Minute)
++	h.Lock()
++	h.usage.BaseUsageBytes = baseUsage
++	h.usage.TotalUsageBytes = baseUsage + extraUsage
++	h.Unlock()
++	return extraErr
++}
++
++func (h *dockerAPIFsHandler) trackUsage() {
++	if err := h.update(); err != nil {
++		glog.Errorf("failed to collect Docker API filesystem stats for %s: %v", h.containerID, err)
++	}
++	ticker := time.NewTicker(common.DefaultPeriod)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-ticker.C:
++			if err := h.update(); err != nil {
++				glog.Errorf("failed to collect Docker API filesystem stats for %s: %v", h.containerID, err)
++			}
++		case <-h.stopChan:
++			return
++		}
++	}
++}
++
++func (h *dockerAPIFsHandler) Start() {
++	go h.trackUsage()
++}
++
++func (h *dockerAPIFsHandler) Stop() {
++	select {
++	case <-h.stopChan:
++	default:
++		close(h.stopChan)
++	}
++}
++
++func (h *dockerAPIFsHandler) Usage() common.FsUsage {
++	h.RLock()
++	defer h.RUnlock()
++	return h.usage
++}
++
+ // dockerFsHandler is a composite FsHandler implementation the incorporates
+ // the common fs handler, a devicemapper ThinPoolWatcher, and a zfsWatcher
+ type dockerFsHandler struct {
+@@ -377,21 +471,29 @@ func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error
+ 		return nil
+ 	}
+ 	var device string
+-	switch self.storageDriver {
+-	case devicemapperStorageDriver:
+-		// Device has to be the pool name to correlate with the device name as
+-		// set in the machine info filesystems.
+-		device = self.poolName
+-	case aufsStorageDriver, overlayStorageDriver, overlay2StorageDriver:
++	if self.containerdSnapshotter {
+ 		deviceInfo, err := self.fsInfo.GetDirFsDevice(self.rootfsStorageDir)
+ 		if err != nil {
+-			return fmt.Errorf("unable to determine device info for dir: %v: %v", self.rootfsStorageDir, err)
++			return fmt.Errorf("unable to determine device info for Docker root %q: %v", self.rootfsStorageDir, err)
+ 		}
+ 		device = deviceInfo.Device
+-	case zfsStorageDriver:
+-		device = self.zfsParent
+-	default:
+-		return nil
++	} else {
++		switch self.storageDriver {
++		case devicemapperStorageDriver:
++			// Device has to be the pool name to correlate with the device name as
++			// set in the machine info filesystems.
++			device = self.poolName
++		case aufsStorageDriver, overlayStorageDriver, overlay2StorageDriver:
++			deviceInfo, err := self.fsInfo.GetDirFsDevice(self.rootfsStorageDir)
++			if err != nil {
++				return fmt.Errorf("unable to determine device info for dir: %v: %v", self.rootfsStorageDir, err)
++			}
++			device = deviceInfo.Device
++		case zfsStorageDriver:
++			device = self.zfsParent
++		default:
++			return nil
++		}
+ 	}
+ 
+ 	var (
+diff --git a/vendor/github.com/google/cadvisor/container/libcontainer/handler.go b/vendor/github.com/google/cadvisor/container/libcontainer/handler.go
+index 18c465f22004ea15190f371f50599f49d0cbe5f9..2e5bb38170a2acb246cd67272d56c4664b534ba1 100644
+--- a/vendor/github.com/google/cadvisor/container/libcontainer/handler.go
++++ b/vendor/github.com/google/cadvisor/container/libcontainer/handler.go
+@@ -57,17 +57,230 @@ func NewHandler(cgroupManager cgroups.Manager, rootFs string, pid int, includedM
+ 	}
+ }
+ 
+-// Get cgroup and networking stats of the specified container
+-func (h *Handler) GetStats() (*info.ContainerStats, error) {
+-	cgroupStats, err := h.cgroupManager.GetStats()
++func getUnifiedCgroupV2Path(cgroupManager cgroups.Manager) (string, bool) {
++	paths := cgroupManager.GetPaths()
++	for _, subsystem := range []string{"memory", "cpu", "cpuset", "blkio", "devices"} {
++		cgroupPath, ok := paths[subsystem]
++		if ok {
++			if _, err := os.Stat(path.Join(cgroupPath, "cgroup.controllers")); err == nil {
++				return path.Clean(cgroupPath), true
++			}
++		}
++	}
++	for _, cgroupPath := range paths {
++		if _, err := os.Stat(path.Join(cgroupPath, "cgroup.controllers")); err == nil {
++			return path.Clean(cgroupPath), true
++		}
++	}
++	return "", false
++}
++
++func readCgroupV2Uint(cgroupPath, name string) (uint64, error) {
++	contents, err := ioutil.ReadFile(path.Join(cgroupPath, name))
++	if err != nil {
++		return 0, err
++	}
++	value := strings.TrimSpace(string(contents))
++	if value == "max" {
++		return ^uint64(0), nil
++	}
++	parsed, err := strconv.ParseUint(value, 10, 64)
++	if err != nil {
++		return 0, fmt.Errorf("failed to parse %s: %v", path.Join(cgroupPath, name), err)
++	}
++	return parsed, nil
++}
++
++func readCgroupV2KeyValues(cgroupPath, name string) (map[string]uint64, error) {
++	filePath := path.Join(cgroupPath, name)
++	file, err := os.Open(filePath)
++	if err != nil {
++		return nil, err
++	}
++	defer file.Close()
++
++	values := make(map[string]uint64)
++	scanner := bufio.NewScanner(file)
++	for scanner.Scan() {
++		fields := strings.Fields(scanner.Text())
++		if len(fields) != 2 {
++			return nil, fmt.Errorf("invalid cgroup v2 key/value in %s: %q", filePath, scanner.Text())
++		}
++		value, err := strconv.ParseUint(fields[1], 10, 64)
++		if err != nil {
++			return nil, fmt.Errorf("failed to parse cgroup v2 value in %s: %v", filePath, err)
++		}
++		values[fields[0]] = value
++	}
++	if err := scanner.Err(); err != nil {
++		return nil, err
++	}
++	return values, nil
++}
++
++func readCgroupV2IoStats(cgroupPath string) (info.DiskIoStats, error) {
++	var stats info.DiskIoStats
++	filePath := path.Join(cgroupPath, "io.stat")
++	file, err := os.Open(filePath)
++	if err != nil {
++		if os.IsNotExist(err) {
++			return stats, nil
++		}
++		return stats, err
++	}
++	defer file.Close()
++
++	scanner := bufio.NewScanner(file)
++	for scanner.Scan() {
++		fields := strings.Fields(scanner.Text())
++		if len(fields) < 2 {
++			continue
++		}
++		device := strings.Split(fields[0], ":")
++		if len(device) != 2 {
++			continue
++		}
++		major, err := strconv.ParseUint(device[0], 10, 64)
++		if err != nil {
++			return stats, fmt.Errorf("failed to parse io.stat major device in %s: %v", filePath, err)
++		}
++		minor, err := strconv.ParseUint(device[1], 10, 64)
++		if err != nil {
++			return stats, fmt.Errorf("failed to parse io.stat minor device in %s: %v", filePath, err)
++		}
++		bytesByOperation := map[string]uint64{}
++		operationsByType := map[string]uint64{}
++		for _, field := range fields[1:] {
++			parts := strings.SplitN(field, "=", 2)
++			if len(parts) != 2 {
++				continue
++			}
++			value, err := strconv.ParseUint(parts[1], 10, 64)
++			if err != nil {
++				return stats, fmt.Errorf("failed to parse io.stat value in %s: %v", filePath, err)
++			}
++			switch parts[0] {
++			case "rbytes":
++				bytesByOperation["Read"] = value
++			case "wbytes":
++				bytesByOperation["Write"] = value
++			case "dbytes":
++				bytesByOperation["Discard"] = value
++			case "rios":
++				operationsByType["Read"] = value
++			case "wios":
++				operationsByType["Write"] = value
++			case "dios":
++				operationsByType["Discard"] = value
++			}
++		}
++		if len(bytesByOperation) > 0 {
++			stats.IoServiceBytes = append(stats.IoServiceBytes, info.PerDiskStats{
++				Major: major,
++				Minor: minor,
++				Stats: bytesByOperation,
++			})
++		}
++		if len(operationsByType) > 0 {
++			stats.IoServiced = append(stats.IoServiced, info.PerDiskStats{
++				Major: major,
++				Minor: minor,
++				Stats: operationsByType,
++			})
++		}
++	}
++	if err := scanner.Err(); err != nil {
++		return stats, err
++	}
++	return stats, nil
++}
++
++func getCgroupV2Stats(cgroupPath string) (*info.ContainerStats, error) {
++	stats := &info.ContainerStats{Timestamp: time.Now()}
++
++	cpu, err := readCgroupV2KeyValues(cgroupPath, "cpu.stat")
++	if err == nil {
++		stats.Cpu.Usage.Total = cpu["usage_usec"] * 1000
++		stats.Cpu.Usage.User = cpu["user_usec"] * 1000
++		stats.Cpu.Usage.System = cpu["system_usec"] * 1000
++		stats.Cpu.CFS.Periods = cpu["nr_periods"]
++		stats.Cpu.CFS.ThrottledPeriods = cpu["nr_throttled"]
++		stats.Cpu.CFS.ThrottledTime = cpu["throttled_usec"] * 1000
++	} else if !os.IsNotExist(err) {
++		return nil, err
++	}
++
++	memory, err := readCgroupV2KeyValues(cgroupPath, "memory.stat")
++	if err == nil {
++		usage, err := readCgroupV2Uint(cgroupPath, "memory.current")
++		if err != nil {
++			if !os.IsNotExist(err) {
++				return nil, err
++			}
++			usage = memory["anon"] + memory["file"]
++		}
++		peak, err := readCgroupV2Uint(cgroupPath, "memory.peak")
++		if err != nil {
++			if !os.IsNotExist(err) {
++				return nil, err
++			}
++			peak = usage
++		}
++		swap, err := readCgroupV2Uint(cgroupPath, "memory.swap.current")
++		if err != nil && !os.IsNotExist(err) {
++			return nil, err
++		}
++		stats.Memory.Usage = usage
++		stats.Memory.MaxUsage = peak
++		stats.Memory.Cache = memory["file"]
++		stats.Memory.RSS = memory["anon"]
++		stats.Memory.Swap = swap
++		stats.Memory.MappedFile = memory["file_mapped"]
++		stats.Memory.ContainerData.Pgfault = memory["pgfault"]
++		stats.Memory.ContainerData.Pgmajfault = memory["pgmajfault"]
++		stats.Memory.HierarchicalData = stats.Memory.ContainerData
++		stats.Memory.WorkingSet = usage
++		if inactiveFile := memory["inactive_file"]; inactiveFile < stats.Memory.WorkingSet {
++			stats.Memory.WorkingSet -= inactiveFile
++		} else {
++			stats.Memory.WorkingSet = 0
++		}
++		if events, err := readCgroupV2KeyValues(cgroupPath, "memory.events"); err == nil {
++			stats.Memory.Failcnt = events["max"]
++		} else if !os.IsNotExist(err) {
++			return nil, err
++		}
++	} else if !os.IsNotExist(err) {
++		return nil, err
++	}
++
++	stats.DiskIo, err = readCgroupV2IoStats(cgroupPath)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	libcontainerStats := &libcontainer.Stats{
+-		CgroupStats: cgroupStats,
++	return stats, nil
++}
++
++// Get cgroup and networking stats of the specified container
++func (h *Handler) GetStats() (*info.ContainerStats, error) {
++	var stats *info.ContainerStats
++	if cgroupPath, ok := getUnifiedCgroupV2Path(h.cgroupManager); ok {
++		var err error
++		stats, err = getCgroupV2Stats(cgroupPath)
++		if err != nil {
++			return nil, err
++		}
++	} else {
++		cgroupStats, err := h.cgroupManager.GetStats()
++		if err != nil {
++			return nil, err
++		}
++		libcontainerStats := &libcontainer.Stats{
++			CgroupStats: cgroupStats,
++		}
++		withPerCPU := h.includedMetrics.Has(container.PerCpuUsageMetrics)
++		stats = newContainerStats(libcontainerStats, withPerCPU)
+ 	}
+-	withPerCPU := h.includedMetrics.Has(container.PerCpuUsageMetrics)
+-	stats := newContainerStats(libcontainerStats, withPerCPU)
+ 
+ 	if h.includedMetrics.Has(container.ProcessSchedulerMetrics) {
+ 		pids, err := h.cgroupManager.GetAllPids()
+diff --git a/vendor/github.com/google/cadvisor/container/libcontainer/handler_cgroupv2_test.go b/vendor/github.com/google/cadvisor/container/libcontainer/handler_cgroupv2_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bf9ee6b09a27f75d6107360a85ebe1c6e67fa32
+--- /dev/null
++++ b/vendor/github.com/google/cadvisor/container/libcontainer/handler_cgroupv2_test.go
+@@ -0,0 +1,120 @@
++// Copyright 2026 PastureStack contributors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++
++package libcontainer
++
++import (
++	"io/ioutil"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func writeUnifiedFixture(t *testing.T, dir, name, contents string) {
++	if err := ioutil.WriteFile(filepath.Join(dir, name), []byte(contents), 0600); err != nil {
++		t.Fatalf("write %s: %v", name, err)
++	}
++}
++
++func newUnifiedFixture(t *testing.T) string {
++	dir, err := ioutil.TempDir("", "cadvisor-libcontainer-cgroupv2-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	writeUnifiedFixture(t, dir, "cgroup.controllers", "cpu io memory\n")
++	writeUnifiedFixture(t, dir, "cpu.stat", "usage_usec 123456\nuser_usec 70000\nsystem_usec 53456\nnr_periods 20\nnr_throttled 3\nthrottled_usec 125\n")
++	writeUnifiedFixture(t, dir, "memory.stat", "anon 1200\nfile 700\nfile_mapped 100\ninactive_file 200\npgfault 9\npgmajfault 2\n")
++	writeUnifiedFixture(t, dir, "io.stat", "8:0 rbytes=11 wbytes=22 rios=1 wios=2 dbytes=33 dios=3\n")
++	return dir
++}
++
++func TestGetCgroupV2StatsReadsKernelCounters(t *testing.T) {
++	dir := newUnifiedFixture(t)
++	defer os.RemoveAll(dir)
++
++	writeUnifiedFixture(t, dir, "memory.current", "2000\n")
++	writeUnifiedFixture(t, dir, "memory.peak", "3000\n")
++	writeUnifiedFixture(t, dir, "memory.swap.current", "400\n")
++	writeUnifiedFixture(t, dir, "memory.events", "low 0\nhigh 0\nmax 3\noom 0\noom_kill 0\n")
++
++	stats, err := getCgroupV2Stats(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.Cpu.Usage.Total != 123456000 || stats.Cpu.Usage.User != 70000000 || stats.Cpu.Usage.System != 53456000 {
++		t.Fatalf("unexpected CPU usage: %#v", stats.Cpu.Usage)
++	}
++	if stats.Cpu.CFS.Periods != 20 || stats.Cpu.CFS.ThrottledPeriods != 3 || stats.Cpu.CFS.ThrottledTime != 125000 {
++		t.Fatalf("unexpected CPU throttling: %#v", stats.Cpu.CFS)
++	}
++	if stats.Memory.Usage != 2000 || stats.Memory.MaxUsage != 3000 || stats.Memory.Cache != 700 || stats.Memory.RSS != 1200 || stats.Memory.Swap != 400 || stats.Memory.MappedFile != 100 || stats.Memory.WorkingSet != 1800 || stats.Memory.Failcnt != 3 {
++		t.Fatalf("unexpected memory stats: %#v", stats.Memory)
++	}
++	if stats.Memory.ContainerData.Pgfault != 9 || stats.Memory.ContainerData.Pgmajfault != 2 || stats.Memory.HierarchicalData != stats.Memory.ContainerData {
++		t.Fatalf("unexpected memory fault stats: %#v", stats.Memory)
++	}
++	if len(stats.DiskIo.IoServiceBytes) != 1 || len(stats.DiskIo.IoServiced) != 1 {
++		t.Fatalf("unexpected disk stats: %#v", stats.DiskIo)
++	}
++	bytes := stats.DiskIo.IoServiceBytes[0]
++	operations := stats.DiskIo.IoServiced[0]
++	if bytes.Major != 8 || bytes.Minor != 0 || bytes.Stats["Read"] != 11 || bytes.Stats["Write"] != 22 || bytes.Stats["Discard"] != 33 {
++		t.Fatalf("unexpected disk bytes: %#v", bytes)
++	}
++	if operations.Stats["Read"] != 1 || operations.Stats["Write"] != 2 || operations.Stats["Discard"] != 3 {
++		t.Fatalf("unexpected disk operations: %#v", operations)
++	}
++}
++
++func TestGetCgroupV2StatsSupportsRootCgroupFiles(t *testing.T) {
++	dir := newUnifiedFixture(t)
++	defer os.RemoveAll(dir)
++
++	stats, err := getCgroupV2Stats(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.Memory.Usage != 1900 || stats.Memory.MaxUsage != 1900 || stats.Memory.Swap != 0 || stats.Memory.WorkingSet != 1700 {
++		t.Fatalf("unexpected root-cgroup fallback: %#v", stats.Memory)
++	}
++}
++
++func TestGetCgroupV2StatsToleratesUnavailableControllers(t *testing.T) {
++	dir, err := ioutil.TempDir("", "cadvisor-libcontainer-cgroupv2-optional-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer os.RemoveAll(dir)
++
++	writeUnifiedFixture(t, dir, "cgroup.controllers", "cpu io\n")
++	writeUnifiedFixture(t, dir, "cpu.stat", "usage_usec 42\n")
++
++	stats, err := getCgroupV2Stats(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.Cpu.Usage.Total != 42000 {
++		t.Fatalf("unexpected CPU usage: %#v", stats.Cpu.Usage)
++	}
++	if stats.Memory.Usage != 0 || stats.Memory.WorkingSet != 0 {
++		t.Fatalf("missing memory controller must remain absent: %#v", stats.Memory)
++	}
++}
++
++func TestGetCgroupV2StatsRejectsMalformedAvailableController(t *testing.T) {
++	dir, err := ioutil.TempDir("", "cadvisor-libcontainer-cgroupv2-invalid-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer os.RemoveAll(dir)
++
++	writeUnifiedFixture(t, dir, "cpu.stat", "usage_usec invalid\n")
++	if _, err := getCgroupV2Stats(dir); err == nil {
++		t.Fatal("malformed controller data must not be silently ignored")
++	}
++}
+diff --git a/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go b/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go
+index d033f7bfc502ffaf66df6f2da1e42a01de10ea6b..f8e808b2cfd20582841bb1bb33e88260dab651ae 100644
+--- a/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go
++++ b/vendor/github.com/google/cadvisor/container/libcontainer/helpers.go
+@@ -16,6 +16,7 @@ package libcontainer
+ 
+ import (
+ 	"fmt"
++	"os"
+ 
+ 	info "github.com/google/cadvisor/info/v1"
+ 
+@@ -38,7 +39,20 @@ func GetCgroupSubsystems() (CgroupSubsystems, error) {
+ 	// Get all cgroup mounts.
+ 	allCgroups, err := cgroups.GetCgroupMounts(true)
+ 	if err != nil {
+-		return CgroupSubsystems{}, err
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return CgroupSubsystems{}, err
++		}
++	}
++	if len(allCgroups) == 0 {
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr != nil {
++			return CgroupSubsystems{}, fmt.Errorf("failed to find cgroup mounts")
++		}
++
++		allCgroups = []cgroups.Mount{{
++			Mountpoint: "/sys/fs/cgroup",
++			Root:       "/",
++			Subsystems: []string{"cpu", "cpuacct", "cpuset", "memory", "blkio", "devices"},
++		}}
+ 	}
+ 
+ 	return getCgroupSubsystemsHelper(allCgroups)
+diff --git a/vendor/github.com/google/cadvisor/manager/manager.go b/vendor/github.com/google/cadvisor/manager/manager.go
+index 0fb6d5dced8cdb16233f189e20f489d968535164..5afb79dfc841df0a08a61bb05cedb22e7f0be988 100644
+--- a/vendor/github.com/google/cadvisor/manager/manager.go
++++ b/vendor/github.com/google/cadvisor/manager/manager.go
+@@ -150,7 +150,15 @@ func New(memoryCache *memory.InMemoryCache, sysfs sysfs.SysFs, maxHousekeepingIn
+ 	// Detect the container we are running on.
+ 	selfContainer, err := cgroups.GetOwnCgroupPath("cpu")
+ 	if err != nil {
+-		return nil, err
++		// cgroup v2 exposes one unified hierarchy instead of a dedicated CPU
++		// mount.  Keep the root identity so kubelet can start while the Docker
++		// runtime remains responsible for per-container resource enforcement.
++		if _, statErr := os.Stat("/sys/fs/cgroup/cgroup.controllers"); statErr == nil {
++			selfContainer = "/"
++			glog.Warningf("Using cgroup v2 compatibility mode for cAdvisor: %v", err)
++		} else {
++			return nil, err
++		}
+ 	}
+ 	glog.V(2).Infof("cAdvisor running in container: %q", selfContainer)
+ 

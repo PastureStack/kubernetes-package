@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pasturestack-runtime-smoke
+  namespace: default
+spec:
+  hostNetwork: true
+  restartPolicy: Always
+  containers:
+    - name: timestamp
+      image: ubuntu:26.04
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - while true; do date -u '+%Y-%m-%dT%H:%M:%SZ'; sleep 5; done

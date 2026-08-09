@@ -39,7 +39,7 @@ spec:
     metadata:
       labels:
         k8s-app: kube-dns
-        rancher-app: kube-dns4
+        $DNS_APP_LABEL_KEY: cluster-dns
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
     spec:
@@ -53,17 +53,30 @@ spec:
           optional: true
       affinity:
         podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-              - key: rancher-app
-                operator: In
-                values:
-                - kube-dns4
-            topologyKey: kubernetes.io/hostname
+          # Prefer separate hosts for availability, but permit a same-host
+          # surge so a one-node cluster can complete a rolling update.
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: $DNS_APP_LABEL_KEY
+                  operator: In
+                  values:
+                  - cluster-dns
+              topologyKey: kubernetes.io/hostname
       containers:
       - name: kubedns
-        image: $DOCKER_IO_REGISTRY/$BASE_IMAGE_NAMESPACE/$KUBEDNS_IMAGE
+        image: $DNS_IMAGE_REGISTRY/$DNS_IMAGE_NAMESPACE/$CLUSTER_DNS_IMAGE
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          capabilities:
+            drop:
+            - ALL
         resources:
           # TODO: Set memory limits when we've profiled the container for large
           # clusters, then set request = limit to keep this container in
@@ -76,10 +89,12 @@ spec:
             memory: 70Mi
         livenessProbe:
           httpGet:
-            path: /healthcheck/kubedns
-            port: 10054
+            path: /readiness
+            port: 8081
             scheme: HTTP
-          initialDelaySeconds: 60
+          # Initial synchronization is bounded at 60 seconds; do not let the
+          # liveness probe restart the process while that first list is active.
+          initialDelaySeconds: 75
           timeoutSeconds: 2
           successThreshold: 1
           failureThreshold: 3
@@ -100,8 +115,13 @@ spec:
         - --domain=$DNS_DOMAIN.
         - --dns-port=10053
         - --config-dir=/kube-dns-config
+        - --initial-sync-timeout=60s
         - --v=$ADDONS_LOG_VERBOSITY_LEVEL
         env:
+        # Kubernetes 1.12 does not provide the initial-event bookmark required
+        # by newer client-go WatchList clients. Use the supported list/watch path.
+        - name: KUBE_FEATURE_WatchListClient
+          value: "false"
         - name: PROMETHEUS_PORT
           value: "10055"
         ports:
@@ -114,72 +134,11 @@ spec:
         - containerPort: 10055
           name: metrics
           protocol: TCP
+        - containerPort: 8081
+          name: status
+          protocol: TCP
         volumeMounts:
         - name: kube-dns-config
           mountPath: /kube-dns-config
-      - name: dnsmasq
-        image: $DOCKER_IO_REGISTRY/$BASE_IMAGE_NAMESPACE/$DNSMASQ_IMAGE
-        livenessProbe:
-          httpGet:
-            path: /healthcheck/dnsmasq
-            port: 10054
-            scheme: HTTP
-          initialDelaySeconds: 60
-          timeoutSeconds: 2
-          successThreshold: 1
-          failureThreshold: 3
-          periodSeconds: 2
-        args:
-        - --v=$ADDONS_LOG_VERBOSITY_LEVEL
-        - -logtostderr
-        - -configDir=/etc/k8s/dns/dnsmasq-nanny
-        - -restartDnsmasq=true
-        - --
-        - -k
-        - --cache-size=1000
-        - --log-facility=-
-        - --server=/$DNS_DOMAIN/127.0.0.1#10053
-        - --server=/in-addr.arpa/127.0.0.1#10053
-        - --server=/ip6.arpa/127.0.0.1#10053
-        ports:
-        - containerPort: 53
-          name: dns
-          protocol: UDP
-        - containerPort: 53
-          name: dns-tcp
-          protocol: TCP
-        # see: https://github.com/kubernetes/kubernetes/issues/29055 for details
-        resources:
-          requests:
-            cpu: 150m
-            memory: 20Mi
-        volumeMounts:
-        - name: kube-dns-config
-          mountPath: /etc/k8s/dns/dnsmasq-nanny
-      - name: sidecar
-        image: $DOCKER_IO_REGISTRY/$BASE_IMAGE_NAMESPACE/$DNS_SIDECAR_IMAGE
-        livenessProbe:
-          httpGet:
-            path: /metrics
-            port: 10054
-            scheme: HTTP
-          initialDelaySeconds: 60
-          timeoutSeconds: 2
-          successThreshold: 1
-          failureThreshold: 3
-          periodSeconds: 2
-        args:
-        - --v=$ADDONS_LOG_VERBOSITY_LEVEL
-        - --logtostderr
-        - --probe=kubedns,127.0.0.1:10053,kubernetes.default.svc.$DNS_DOMAIN,5,A
-        - --probe=dnsmasq,127.0.0.1:53,kubernetes.default.svc.$DNS_DOMAIN,5,A
-        ports:
-        - containerPort: 10054
-          name: metrics
-          protocol: TCP
-        resources:
-          requests:
-            memory: 20Mi
-            cpu: 10m
       dnsPolicy: Default  # Don't use cluster DNS.
-      serviceAccountName: io-rancher-system
+      serviceAccountName: $DNS_SERVICE_ACCOUNT

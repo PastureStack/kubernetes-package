@@ -1,0 +1,114 @@
+#!/opt/az/bin/python3
+"""Fail the image build when reviewed Azure Python security assumptions drift."""
+
+import importlib.metadata
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+EXPECTED_VERSIONS = {
+    "azure-cli": "2.89.0",
+    "azure-cli-core": "2.89.0",
+    "cryptography": "48.0.1",
+    "msal": "1.36.0",
+    "pyOpenSSL": "26.2.0",
+}
+
+REVIEWED_EXTERNAL_CALLS = {
+    "CVE-2026-69247": (
+        b"pkcs7_decrypt_der",
+        b"pkcs7_decrypt_pem",
+        b"pkcs7_decrypt_smime",
+    ),
+    "CVE-2026-69249": (
+        b"cryptography.x509.verification",
+        b"x509 import verification",
+        b"PolicyBuilder(",
+        b"build_client_verifier",
+        b"build_server_verifier",
+    ),
+}
+
+
+def fail(message):
+    print(f"KUBERNETES_PACKAGE_AZURE_PYTHON_SECURITY_FAILED {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+for distribution, expected in EXPECTED_VERSIONS.items():
+    actual = importlib.metadata.version(distribution)
+    if actual != expected:
+        fail(f"distribution={distribution} expected={expected} actual={actual}")
+
+site_packages = Path(importlib.metadata.distribution("cryptography").locate_file(""))
+if not site_packages.is_dir():
+    fail(f"site_packages_missing={site_packages}")
+
+hits = []
+for path in sorted(site_packages.rglob("*.py")):
+    relative = path.relative_to(site_packages)
+    if relative.parts and relative.parts[0] == "cryptography":
+        continue
+    data = path.read_bytes()
+    for vulnerability, tokens in REVIEWED_EXTERNAL_CALLS.items():
+        for token in tokens:
+            if token in data:
+                hits.append((vulnerability, relative.as_posix(), token.decode("ascii")))
+
+if hits:
+    for vulnerability, path, token in hits:
+        print(f"{vulnerability}\t{path}\t{token}", file=sys.stderr)
+    fail(f"external_vulnerable_api_references={len(hits)}")
+
+# Prove the reviewed symbols and search root exist. An empty or broken search
+# must never be mistaken for a successful reachability result.
+from cryptography.hazmat.primitives.serialization import pkcs7  # noqa: E402
+from cryptography.x509 import verification  # noqa: E402
+
+for symbol in ("pkcs7_decrypt_der", "pkcs7_decrypt_pem", "pkcs7_decrypt_smime"):
+    if not hasattr(pkcs7, symbol):
+        fail(f"reviewed_symbol_missing=cryptography.pkcs7.{symbol}")
+if not hasattr(verification, "PolicyBuilder"):
+    fail("reviewed_symbol_missing=cryptography.x509.verification.PolicyBuilder")
+
+with tempfile.TemporaryDirectory(prefix="pasturestack-azure-security-") as config_dir:
+    environment = os.environ.copy()
+    environment["AZURE_CONFIG_DIR"] = config_dir
+    environment["HOME"] = config_dir
+
+    def run(*arguments, capture=False):
+        return subprocess.run(
+            arguments,
+            check=True,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+    run("az", "cloud", "set", "--name", "AzureCloud")
+    selected_cloud = run(
+        "az", "cloud", "show", "--query", "name", "--output", "tsv", capture=True
+    ).stdout.strip()
+    if selected_cloud != "AzureCloud":
+        fail(f"azure_cloud_selection={selected_cloud!r}")
+    reported_versions = json.loads(run("az", "version", capture=True).stdout)
+    if reported_versions.get("azure-cli") != EXPECTED_VERSIONS["azure-cli"]:
+        fail(f"azure_cli_reported_version={reported_versions.get('azure-cli')!r}")
+    for command in (
+        ("az", "login", "--help"),
+        ("az", "vm", "nic", "list", "--help"),
+        ("az", "vm", "nic", "show", "--help"),
+        ("az", "logout", "--help"),
+    ):
+        run(*command)
+
+print(
+    "KUBERNETES_PACKAGE_AZURE_PYTHON_SECURITY_OK "
+    "versions=exact external_vulnerable_api_references=0 commands=registered"
+)

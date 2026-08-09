@@ -1,0 +1,775 @@
+name: Manual security release gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-package-security-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Build, test, scan, and inventory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      DAPPER_IMAGE: pasturestack-kubernetes-package-dapper:security-gate
+      IMAGE: pasturestack/kubernetes-package:v1.12.11
+      TAG: v1.12.11
+      KUBERNETES_BINARY_VERSION: v1.12.11
+      TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
+      TRIVY_CACHE: /tmp/pasturestack-trivy-cache
+      ETCD_TEST_IMAGE: pasturestack/etcd-image:v3.7.2
+      ETCD_TEST_VERSION: 3.7.2
+      ETCD_TEST_UPSTREAM_VERSION: 3.7.1
+      ETCD_TEST_SOURCE_REPOSITORY: https://github.com/PastureStack/etcd-image.git
+      ETCD_TEST_SOURCE_REVISION: 24c626275522fbc3a4c9683cc90ff489b2b366de
+      ETCD_TEST_SOURCE_TREE: 9bbe6c138bd005fd2798d842ebfaae3aeac5579c
+      CLUSTER_DNS_IMAGE: ghcr.io/pasturestack/cluster-dns:1.26.9
+      CLUSTER_DNS_VERSION: 1.26.9
+      CLUSTER_DNS_UPSTREAM_REVISION: c3ddef3eb784fd06be17fd056acc79f2a6d709ce
+      CLUSTER_DNS_BASE_IMAGE: gcr.io/distroless/static-debian12@sha256:4b2a093ef4649bccd586625090a3c668b254cfe180dee54f4c94f3e9bd7e381e
+    steps:
+      - name: Check out the complete source history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record the clean source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          docker version
+          docker buildx version
+          df -h /
+
+      - name: Run validation and build the candidate image
+        shell: bash
+        run: |
+          set -euo pipefail
+          make validate package \
+            DAPPER_IMAGE="$DAPPER_IMAGE" \
+            IMAGE="$IMAGE" \
+            TAG="$TAG" \
+            KUBERNETES_BINARY_VERSION="$KUBERNETES_BINARY_VERSION"
+          test "$(cat dist/images)" = "$IMAGE"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$TAG"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.version"}}')" = 'v1.9.1'
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.revision"}}')" = 'adc3e6b5b581638afbd194cf2e9319ecbb0151a1'
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.go.version"}}')" = '1.26.5'
+          for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler; do
+            test "$(docker run --rm --entrypoint "/usr/bin/${binary}" "$IMAGE" --version)" = \
+              "Kubernetes ${KUBERNETES_BINARY_VERSION}"
+          done
+          docker run --rm --entrypoint /usr/bin/kubectl "$IMAGE" \
+            version --client=true --short=true | grep -F "$KUBERNETES_BINARY_VERSION"
+          license_container=$(docker create "$IMAGE")
+          docker cp "$license_container:/licenses/CNI-LICENSE" dist/CNI-LICENSE.txt
+          docker cp "$license_container:/opt/loopback/bin/loopback" "${RUNNER_TEMP}/cni-loopback.image"
+          docker rm "$license_container" >/dev/null
+          echo 'b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1  dist/CNI-LICENSE.txt' | sha256sum -c -
+          test "$(sha256sum "${RUNNER_TEMP}/cni-loopback.image" | cut -d' ' -f1)" = \
+            "$(cut -d' ' -f1 dist/cni-loopback.sha256)"
+          grep -F 'go1.26.5' dist/cni-loopback-go-version.txt
+          grep -F 'CNI loopback plugin v1.9.1' dist/cni-loopback-version.txt
+          docker run --rm --entrypoint /opt/loopback/bin/loopback "$IMAGE" 2>&1 | \
+            grep -F 'CNI loopback plugin v1.9.1'
+          rm -f "${RUNNER_TEMP}/cni-loopback.image"
+          docker run --rm --entrypoint /usr/local/bin/verify-azure-python-security "$IMAGE"
+
+          dns_source_root=$(mktemp -d "${RUNNER_TEMP}/cluster-dns-source.XXXXXX")
+          dns_source="$dns_source_root/source"
+          bash scripts/prepare-cluster-dns-source "$dns_source"
+          mkdir -p dist/cluster-dns-context
+          docker run --rm --network none \
+            --entrypoint /bin/bash \
+            -v "$dns_source:/src" \
+            -v "$GITHUB_WORKSPACE/dist:/out" \
+            -w /src \
+            "$DAPPER_IMAGE" -c '
+              set -euo pipefail
+              test -z "$(gofmt -d pkg/dns/config/config.go pkg/dns/config/config_test.go)"
+              go test -mod=vendor ./pkg/dns/... ./cmd/kube-dns/...
+              export CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+              build() {
+                go build -trimpath -buildvcs=false -mod=vendor \
+                  -ldflags "-buildid= -X k8s.io/dns/pkg/version.VERSION=1.26.9" \
+                  -o "$1" ./cmd/kube-dns
+              }
+              build /out/cluster-dns.first
+              build /out/cluster-dns.second
+              cmp /out/cluster-dns.first /out/cluster-dns.second
+              mv /out/cluster-dns.first /out/cluster-dns
+              rm /out/cluster-dns.second
+              go version -m /out/cluster-dns > /out/cluster-dns-go-version.txt
+            '
+          cp "$dns_source/LICENSE" dist/cluster-dns-context/LICENSE.kubernetes-dns
+          cp "$dns_source/go.mod" dist/cluster-dns-go.mod
+          cp "$dns_source/go.sum" dist/cluster-dns-go.sum
+          cp dist/cluster-dns dist/cluster-dns-context/cluster-dns
+          chmod 0755 dist/cluster-dns-context/cluster-dns
+          mkdir -p dist/cluster-dns-context/third-party-licenses
+          license_count=0
+          while IFS= read -r -d '' legal_file; do
+            relative_path=${legal_file#"$dns_source/"}
+            install -D -m 0644 "$legal_file" \
+              "dist/cluster-dns-context/third-party-licenses/$relative_path"
+            license_count=$((license_count + 1))
+          done < <(find "$dns_source/vendor" "$dns_source/third_party" -type f \
+            \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) \
+            -print0 | sort -z)
+          test "$license_count" -eq 106
+          (
+            cd "$dns_source"
+            find vendor third_party -type f \
+              \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) \
+              -print0 | sort -z | xargs -0 sha256sum
+          ) > dist/cluster-dns-third-party-license-sha256.txt
+          printf '%s\n' "$CLUSTER_DNS_UPSTREAM_REVISION" > dist/cluster-dns-upstream-revision.txt
+          sha256sum dist/cluster-dns > dist/cluster-dns-binary.sha256
+
+          docker pull "$CLUSTER_DNS_BASE_IMAGE"
+          docker image inspect "$CLUSTER_DNS_BASE_IMAGE" --format '{{range .RepoDigests}}{{println .}}{{end}}' |
+            grep -Fx "$CLUSTER_DNS_BASE_IMAGE"
+          docker build --network none \
+            --build-arg IMAGE_VERSION="$CLUSTER_DNS_VERSION" \
+            --build-arg SOURCE_REVISION="$GITHUB_SHA" \
+            --build-arg UPSTREAM_REVISION="$CLUSTER_DNS_UPSTREAM_REVISION" \
+            --tag "$CLUSTER_DNS_IMAGE" \
+            --file dns-image/Dockerfile dist/cluster-dns-context
+          test "$(docker image inspect "$CLUSTER_DNS_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$CLUSTER_DNS_VERSION"
+          test "$(docker image inspect "$CLUSTER_DNS_IMAGE" --format '{{index .Config.Labels "io.pasturestack.upstream.revision"}}')" = "$CLUSTER_DNS_UPSTREAM_REVISION"
+          test "$(docker image inspect "$CLUSTER_DNS_IMAGE" --format '{{index .Config.Labels "io.pasturestack.third-party-licenses"}}')" = '/licenses/cluster-dns-third-party'
+          test "$(docker image inspect "$CLUSTER_DNS_IMAGE" --format '{{.Config.User}}')" = '65532:65532'
+          docker image inspect "$CLUSTER_DNS_IMAGE" --format '{{range .Config.Env}}{{println .}}{{end}}' |
+            grep -Fx 'KUBE_FEATURE_WatchListClient=false'
+          docker run --rm "$CLUSTER_DNS_IMAGE" --version 2>&1 | grep -F "$CLUSTER_DNS_VERSION"
+          license_container=$(docker create "$CLUSTER_DNS_IMAGE")
+          mkdir -p dist/cluster-dns-image-licenses
+          docker cp "$license_container:/licenses/LICENSE.kubernetes-dns" \
+            dist/cluster-dns-image-licenses/LICENSE.kubernetes-dns
+          docker cp "$license_container:/licenses/cluster-dns-third-party" \
+            dist/cluster-dns-image-licenses/cluster-dns-third-party
+          docker rm "$license_container" >/dev/null
+          test "$(find dist/cluster-dns-image-licenses/cluster-dns-third-party \
+            -type f | wc -l)" -eq 106
+          rm -rf -- dist/cluster-dns-image-licenses
+          rm -rf -- "$dns_source_root"
+
+      - name: Build the exact supported etcd integration candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir=$(mktemp -d "${RUNNER_TEMP}/etcd-image-source.XXXXXX")
+          cleanup_source() {
+            rm -rf -- "$source_dir"
+          }
+          trap cleanup_source EXIT
+
+          git -C "$source_dir" init --quiet
+          git -C "$source_dir" remote add origin "$ETCD_TEST_SOURCE_REPOSITORY"
+          git -C "$source_dir" fetch --depth=1 --no-tags origin "$ETCD_TEST_SOURCE_REVISION"
+          git -C "$source_dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$ETCD_TEST_SOURCE_REVISION"
+          test "$(git -C "$source_dir" rev-parse 'HEAD^{tree}')" = "$ETCD_TEST_SOURCE_TREE"
+          test -z "$(git -C "$source_dir" status --porcelain)"
+
+          docker build --pull \
+            --build-arg SOURCE_REVISION="$ETCD_TEST_SOURCE_REVISION" \
+            --tag "$ETCD_TEST_IMAGE" \
+            "$source_dir"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$ETCD_TEST_IMAGE")" = "$ETCD_TEST_VERSION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ETCD_TEST_IMAGE")" = "$ETCD_TEST_SOURCE_REVISION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "io.pasturestack.upstream.version" }}' "$ETCD_TEST_IMAGE")" = "$ETCD_TEST_UPSTREAM_VERSION"
+          test "$(docker image inspect --format '{{.Config.User}}' "$ETCD_TEST_IMAGE")" = '65532:65532'
+          docker run --rm --network none "$ETCD_TEST_IMAGE" --version |
+            tee dist/etcd-integration-version.txt
+          grep -F "etcd Version: $ETCD_TEST_VERSION" dist/etcd-integration-version.txt
+          docker run --rm --network none --entrypoint /usr/local/bin/etcdctl \
+            "$ETCD_TEST_IMAGE" version | tee dist/etcdctl-integration-version.txt
+          grep -F "etcdctl version: $ETCD_TEST_VERSION" dist/etcdctl-integration-version.txt
+          printf '%s\n' "$ETCD_TEST_SOURCE_REVISION" > dist/etcd-integration-source-revision.txt
+          printf '%s\n' "$ETCD_TEST_SOURCE_TREE" > dist/etcd-integration-source-tree.txt
+
+          cleanup_source
+          trap - EXIT
+
+      - name: Scan source, candidate, and build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TRIVY_CACHE"
+          docker pull "$TRIVY_IMAGE"
+          docker image inspect "$TRIVY_IMAGE" --format '{{join .RepoDigests "\n"}}' |
+            grep -Fq 'aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c'
+          test "$(docker run --rm "$TRIVY_IMAGE" --version)" = 'Version: 0.73.0'
+          bash scripts/generate-dapper-openvex > dist/dapper-openvex.json
+          test "$(jq '.statements | length' dist/dapper-openvex.json)" = 46
+
+          docker run --rm --network none \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$GITHUB_WORKSPACE/dist:/evidence" \
+            "$TRIVY_IMAGE" \
+            fs --scanners secret --format json --output /evidence/source-secret-scan.json \
+            /workspace
+
+          docker run --rm \
+            -v "$TRIVY_CACHE:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" \
+            image --cache-dir /root/.cache/trivy --download-db-only
+
+          run_image_scan() {
+            docker run --rm --network none \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$TRIVY_CACHE:/root/.cache/trivy" \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$GITHUB_WORKSPACE/dist:/evidence" \
+              "$TRIVY_IMAGE" \
+              image --cache-dir /root/.cache/trivy --skip-db-update --offline-scan "$@"
+          }
+
+          run_image_scan \
+            --scanners vuln,secret \
+            --severity CRITICAL,HIGH \
+            --format json \
+            --output /evidence/kubernetes-package.raw.json \
+            "$IMAGE"
+          run_image_scan \
+            --scanners vuln,secret \
+            --severity CRITICAL,HIGH \
+            --vex /workspace/security/openvex.json \
+            --format json \
+            --output /evidence/kubernetes-package.applicable.json \
+            "$IMAGE"
+          run_image_scan \
+            --scanners vuln,secret \
+            --format json \
+            --output /evidence/dapper.raw.json \
+            "$DAPPER_IMAGE"
+          run_image_scan \
+            --scanners vuln,secret \
+            --vex /workspace/dist/dapper-openvex.json \
+            --format json \
+            --output /evidence/dapper.applicable.json \
+            "$DAPPER_IMAGE"
+          run_image_scan \
+            --scanners vuln \
+            --format cyclonedx \
+            --output /evidence/kubernetes-package.cdx.json \
+            "$IMAGE"
+
+          run_image_scan \
+            --scanners vuln,secret \
+            --severity CRITICAL,HIGH \
+            --format json \
+            --output /evidence/cluster-dns.raw.json \
+            "$CLUSTER_DNS_IMAGE"
+          run_image_scan \
+            --scanners vuln \
+            --format cyclonedx \
+            --output /evidence/cluster-dns.cdx.json \
+            "$CLUSTER_DNS_IMAGE"
+
+          run_image_scan \
+            --scanners vuln,secret \
+            --severity CRITICAL,HIGH \
+            --format json \
+            --output /evidence/etcd-integration.raw.json \
+            "$ETCD_TEST_IMAGE"
+          run_image_scan \
+            --scanners vuln \
+            --format cyclonedx \
+            --output /evidence/etcd-integration.cdx.json \
+            "$ETCD_TEST_IMAGE"
+
+      - name: Prove Kubernetes 1.12 DNS compatibility and least privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="pstk-dns-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          network="${prefix}-network"
+          etcd_container="${prefix}-etcd"
+          api_container="${prefix}-api"
+          dns_container="${prefix}-kubedns"
+          work_dir=$(mktemp -d "${RUNNER_TEMP}/${prefix}.XXXXXX")
+          stage=initializing
+
+          cleanup() {
+            status=$?
+            trap - EXIT
+            docker logs "$etcd_container" > dist/dns-etcd.log 2>&1 || true
+            docker logs "$api_container" > dist/dns-kube-apiserver.log 2>&1 || true
+            docker logs "$dns_container" > dist/cluster-dns.log 2>&1 || true
+            if [ "$status" -ne 0 ]; then
+              echo "KUBERNETES_DNS_INTEGRATION_FAILED stage=${stage}" >&2
+              for log in dist/dns-etcd.log dist/dns-kube-apiserver.log dist/cluster-dns.log; do
+                echo "--- ${log} ---" >&2
+                tail -n 100 "$log" >&2 || true
+              done
+            fi
+            docker rm -f "$dns_container" "$api_container" "$etcd_container" >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+            rm -rf -- "$work_dir"
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          wait_for() {
+            attempts=$1
+            delay=$2
+            shift 2
+            for attempt in $(seq 1 "$attempts"); do
+              if "$@" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep "$delay"
+            done
+            "$@"
+          }
+
+          checkpoint() {
+            stage=$1
+            echo "KUBERNETES_DNS_GATE_STAGE=${stage}"
+          }
+
+          run_kubectl() {
+            docker run --rm --network "$network" \
+              --entrypoint /usr/bin/kubectl \
+              "$IMAGE" --server=http://kubernetes-api:8080 "$@"
+          }
+
+          subject_access_allowed() {
+            verb=$1
+            api_group=$2
+            resource=$3
+            namespace=$4
+            jq -n \
+              --arg verb "$verb" \
+              --arg group "$api_group" \
+              --arg resource "$resource" \
+              --arg namespace "$namespace" \
+              '{
+                apiVersion: "authorization.k8s.io/v1",
+                kind: "SubjectAccessReview",
+                spec: {
+                  user: "system:serviceaccount:kube-system:kube-dns",
+                  groups: [
+                    "system:serviceaccounts",
+                    "system:serviceaccounts:kube-system",
+                    "system:authenticated"
+                  ],
+                  resourceAttributes: {
+                    verb: $verb,
+                    group: $group,
+                    resource: $resource,
+                    namespace: $namespace
+                  }
+                }
+              }' |
+              docker run --rm --interactive --network "$network" \
+                --entrypoint /usr/bin/kubectl "$IMAGE" \
+                --server=http://kubernetes-api:8080 create -f - -o json |
+              jq -r '.status.allowed'
+          }
+
+          assert_subject_access() {
+            expected=$1
+            shift
+            actual=$(subject_access_allowed "$@")
+            echo "KUBERNETES_DNS_RBAC expected=${expected} actual=${actual} verb=$1 group=$2 resource=$3 namespace=$4"
+            test "$actual" = "$expected"
+          }
+
+          checkpoint verify-etcd-candidate
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$ETCD_TEST_IMAGE")" = "$ETCD_TEST_VERSION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ETCD_TEST_IMAGE")" = "$ETCD_TEST_SOURCE_REVISION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "io.pasturestack.upstream.version" }}' "$ETCD_TEST_IMAGE")" = "$ETCD_TEST_UPSTREAM_VERSION"
+          grep -Fx "$ETCD_TEST_SOURCE_REVISION" dist/etcd-integration-source-revision.txt
+          grep -Fx "$ETCD_TEST_SOURCE_TREE" dist/etcd-integration-source-tree.txt
+
+          checkpoint start-etcd
+          docker network create --internal "$network" >/dev/null
+          docker run -d --name "$etcd_container" --network "$network" \
+            --network-alias etcd \
+            --tmpfs '/tmp:rw,noexec,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=0700' \
+            --entrypoint /usr/local/bin/etcd \
+            "$ETCD_TEST_IMAGE" \
+            --name=dns-test \
+            --data-dir=/tmp/etcd-data \
+            --listen-client-urls=http://0.0.0.0:2379 \
+            --advertise-client-urls=http://etcd:2379 \
+            --listen-peer-urls=http://0.0.0.0:2380 \
+            --initial-advertise-peer-urls=http://etcd:2380 \
+            --initial-cluster=dns-test=http://etcd:2380 \
+            --initial-cluster-state=new >/dev/null
+          wait_for 60 1 docker exec "$etcd_container" /usr/local/bin/etcdctl \
+            --endpoints=http://127.0.0.1:2379 endpoint health
+
+          checkpoint start-kubernetes-api
+          docker run -d --name "$api_container" --network "$network" \
+            --network-alias kubernetes-api --entrypoint /usr/bin/kube-apiserver \
+            "$IMAGE" \
+            --etcd-servers=http://etcd:2379 \
+            --storage-backend=etcd3 \
+            --insecure-bind-address=0.0.0.0 \
+            --insecure-port=8080 \
+            --secure-port=6443 \
+            --advertise-address=127.0.0.1 \
+            --endpoint-reconciler-type=none \
+            --service-cluster-ip-range=10.43.0.0/16 \
+            --authorization-mode=RBAC \
+            --admission-control=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota >/dev/null
+          wait_for 90 1 run_kubectl get --raw=/healthz
+
+          checkpoint apply-probe-and-rbac
+          run_kubectl get namespace kube-system >/dev/null 2>&1 ||
+            run_kubectl create namespace kube-system >/dev/null
+          sed 's/\$DNS_SERVICE_ACCOUNT/kube-dns/g' \
+            addon-templates/kubectl/dns/kubedns-rbac.yaml > "$work_dir/kubedns-rbac.yaml"
+          cat > "$work_dir/probe-service.yaml" <<'EOF'
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: dns-compatibility-probe
+            namespace: default
+          spec:
+            clusterIP: 10.43.0.53
+            ports:
+              - name: http
+                port: 80
+                protocol: TCP
+          ---
+          apiVersion: v1
+          kind: Endpoints
+          metadata:
+            name: dns-compatibility-probe
+            namespace: default
+          subsets:
+            - addresses:
+                - ip: 192.0.2.53
+              ports:
+                - name: http
+                  port: 80
+                  protocol: TCP
+          EOF
+          docker run --rm --network "$network" \
+            --mount "type=bind,src=$work_dir,dst=/work,readonly" \
+            --entrypoint /usr/bin/kubectl "$IMAGE" \
+            --server=http://kubernetes-api:8080 apply \
+            -f /work/kubedns-rbac.yaml -f /work/probe-service.yaml >/dev/null
+
+          checkpoint verify-rbac
+          wait_for 30 1 run_kubectl get clusterrole system:kube-dns
+          run_kubectl get clusterrole system:kube-dns -o json |
+            jq -e '
+              ([.rules[] | .resources[]] | sort) == ["endpoints", "services"] and
+              ([.rules[] | .verbs[]] | unique | sort) == ["list", "watch"]
+            ' >/dev/null
+          run_kubectl get clusterrolebinding system:kube-dns -o json |
+            jq -e '
+              .roleRef.kind == "ClusterRole" and
+              .roleRef.name == "system:kube-dns" and
+              any(.subjects[];
+                .kind == "ServiceAccount" and
+                .namespace == "kube-system" and
+                .name == "kube-dns")
+            ' >/dev/null
+          assert_subject_access true list '' services ''
+          assert_subject_access true watch '' endpoints ''
+          assert_subject_access false get '' secrets ''
+          assert_subject_access false create extensions deployments ''
+          assert_subject_access false bind rbac.authorization.k8s.io clusterroles ''
+
+          checkpoint start-kube-dns
+          docker run -d --name "$dns_container" --network "$network" \
+            --network-alias cluster-dns \
+            -e PROMETHEUS_PORT=10055 \
+            "$CLUSTER_DNS_IMAGE" \
+            --domain=cluster.local. \
+            --dns-port=10053 \
+            --kube-master-url=http://kubernetes-api:8080 \
+            --initial-sync-timeout=60s \
+            --v=2 >/dev/null
+          wait_for 90 1 docker run --rm --network "container:${dns_container}" \
+            --entrypoint /usr/bin/curl "$IMAGE" -fsS http://127.0.0.1:8081/readiness
+          wait_for 60 1 docker run --rm --network "container:${dns_container}" \
+            --entrypoint /usr/bin/curl "$IMAGE" -fsS http://127.0.0.1:10055/metrics
+
+          checkpoint query-dns
+          docker run --rm --interactive --network "$network" \
+            --entrypoint /opt/az/bin/python3 "$IMAGE" - <<'PY'
+          import socket
+          import struct
+
+          labels = "dns-compatibility-probe.default.svc.cluster.local".split(".")
+          question = b"".join(bytes([len(label)]) + label.encode("ascii") for label in labels) + b"\x00"
+          query = b"\x12\x34" + struct.pack("!HHHHH", 0x0100, 1, 0, 0, 0) + question + struct.pack("!HH", 1, 1)
+          def assert_response(response, transport):
+              if response[:2] != b"\x12\x34" or response[3] & 0x0F:
+                  raise SystemExit(f"{transport} DNS response has an unexpected transaction ID or response code")
+              answer_count = struct.unpack("!H", response[6:8])[0]
+              if answer_count < 1 or socket.inet_aton("10.43.0.53") not in response:
+                  raise SystemExit(f"{transport} DNS response did not contain the expected Service address")
+
+          udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          udp.settimeout(10)
+          udp.sendto(query, ("cluster-dns", 10053))
+          response, _ = udp.recvfrom(4096)
+          assert_response(response, "UDP")
+
+          tcp = socket.create_connection(("cluster-dns", 10053), timeout=10)
+          tcp.sendall(struct.pack("!H", len(query)) + query)
+          length_data = tcp.recv(2)
+          if len(length_data) != 2:
+              raise SystemExit("TCP DNS response length is missing")
+          remaining = struct.unpack("!H", length_data)[0]
+          chunks = []
+          while remaining:
+              chunk = tcp.recv(remaining)
+              if not chunk:
+                  raise SystemExit("TCP DNS response ended early")
+              chunks.append(chunk)
+              remaining -= len(chunk)
+          assert_response(b"".join(chunks), "TCP")
+          PY
+
+          checkpoint record-evidence
+          jq -n \
+            --arg source_revision "$GITHUB_SHA" \
+            --arg kubernetes_api "v1.12.11 compatibility build" \
+            --arg etcd_version "$ETCD_TEST_VERSION" \
+            --arg etcd_upstream_version "$ETCD_TEST_UPSTREAM_VERSION" \
+            --arg etcd_source_revision "$ETCD_TEST_SOURCE_REVISION" \
+            --arg etcd_source_tree "$ETCD_TEST_SOURCE_TREE" \
+            --arg dns_version "$CLUSTER_DNS_VERSION" \
+            --arg service_ip "10.43.0.53" \
+            '{
+              source_revision: $source_revision,
+              kubernetes_api: $kubernetes_api,
+              storage_backend: "etcd3",
+              etcd: {
+                version: $etcd_version,
+                upstream_version: $etcd_upstream_version,
+                source_revision: $etcd_source_revision,
+                source_tree: $etcd_source_tree
+              },
+              dns_version: $dns_version,
+              service_ip: $service_ip,
+              api_discovery: "passed",
+              dns_resolution: "passed",
+              readiness: "passed",
+              metrics: "passed",
+              least_privilege: "passed"
+            }' > dist/kubernetes-dns-integration.json
+
+      - name: Assemble short-lived security evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /bin/cat "$DAPPER_IMAGE" \
+            /licenses/DAPPER-UBUNTU-APT-PACKAGES.tsv \
+            > dist/dapper-ubuntu-apt-packages.tsv
+          docker run --rm --entrypoint /bin/cat "$DAPPER_IMAGE" \
+            /licenses/DAPPER-LINUX-LIBC-DEV-FILES.txt \
+            > dist/dapper-linux-libc-dev-files.txt
+          docker run --rm --entrypoint /bin/cat "$IMAGE" \
+            /licenses/KUBERNETES-PACKAGE-UBUNTU-APT-PACKAGES.tsv \
+            > dist/kubernetes-package-ubuntu-apt-packages.tsv
+          cp package/ubuntu-apt.lock dist/ubuntu-apt.lock
+          printf '%s\n' "$GITHUB_SHA" > dist/source-revision.txt
+          source_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/source-secret-scan.json)
+          raw_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/kubernetes-package.raw.json)
+          raw_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/kubernetes-package.raw.json)
+          applicable_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/kubernetes-package.applicable.json)
+          applicable_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/kubernetes-package.applicable.json)
+          applicable_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/kubernetes-package.applicable.json)
+          dapper_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/dapper.raw.json)
+          dapper_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/dapper.raw.json)
+          dapper_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/dapper.raw.json)
+          dapper_applicable_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/dapper.applicable.json)
+          dapper_applicable_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/dapper.applicable.json)
+          dapper_applicable_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/dapper.applicable.json)
+          dapper_reviewed=$(jq --slurpfile vex dist/dapper-openvex.json '
+            [.Results[]?.Vulnerabilities[]? |
+              select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+              select(.VulnerabilityID as $id | any($vex[0].statements[]; .vulnerability.name == $id))] |
+            length' dist/dapper.raw.json)
+          dapper_vex_statements=$(jq '.statements | length' dist/dapper-openvex.json)
+          reviewed_69247=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69247")] | length' dist/kubernetes-package.raw.json)
+          reviewed_69249=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249")] | length' dist/kubernetes-package.raw.json)
+          cluster_dns_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/cluster-dns.raw.json)
+          cluster_dns_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/cluster-dns.raw.json)
+          cluster_dns_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/cluster-dns.raw.json)
+          etcd_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/etcd-integration.raw.json)
+          etcd_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/etcd-integration.raw.json)
+          etcd_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/etcd-integration.raw.json)
+          etcd_components=$(jq '[.components[]?] | length' dist/etcd-integration.cdx.json)
+          dns_integration_passed=$(jq '[.api_discovery, .dns_resolution, .readiness, .metrics, .least_privilege] | all(. == "passed")' dist/kubernetes-dns-integration.json)
+          jq -n \
+            --argjson source_secrets "$source_secrets" \
+            --argjson candidate_raw_critical "$raw_critical" \
+            --argjson candidate_raw_high "$raw_high" \
+            --argjson candidate_applicable_critical "$applicable_critical" \
+            --argjson candidate_applicable_high "$applicable_high" \
+            --argjson candidate_applicable_secrets "$applicable_secrets" \
+            --argjson dapper_critical "$dapper_critical" \
+            --argjson dapper_high "$dapper_high" \
+            --argjson dapper_secrets "$dapper_secrets" \
+            --argjson dapper_applicable_critical "$dapper_applicable_critical" \
+            --argjson dapper_applicable_high "$dapper_applicable_high" \
+            --argjson dapper_applicable_secrets "$dapper_applicable_secrets" \
+            --argjson dapper_reviewed "$dapper_reviewed" \
+            --argjson dapper_vex_statements "$dapper_vex_statements" \
+            --argjson reviewed_69247 "$reviewed_69247" \
+            --argjson reviewed_69249 "$reviewed_69249" \
+            --argjson cluster_dns_critical "$cluster_dns_critical" \
+            --argjson cluster_dns_high "$cluster_dns_high" \
+            --argjson cluster_dns_secrets "$cluster_dns_secrets" \
+            --argjson etcd_critical "$etcd_critical" \
+            --argjson etcd_high "$etcd_high" \
+            --argjson etcd_secrets "$etcd_secrets" \
+            --argjson etcd_components "$etcd_components" \
+            --arg etcd_version "$ETCD_TEST_VERSION" \
+            --arg etcd_upstream_version "$ETCD_TEST_UPSTREAM_VERSION" \
+            --arg etcd_source_revision "$ETCD_TEST_SOURCE_REVISION" \
+            --arg etcd_source_tree "$ETCD_TEST_SOURCE_TREE" \
+            --argjson dns_integration_passed "$dns_integration_passed" \
+            '{
+              source_secrets: $source_secrets,
+              candidate_raw_critical: $candidate_raw_critical,
+              candidate_raw_high: $candidate_raw_high,
+              candidate_applicable_critical: $candidate_applicable_critical,
+              candidate_applicable_high: $candidate_applicable_high,
+              candidate_applicable_secrets: $candidate_applicable_secrets,
+              dapper_critical: $dapper_critical,
+              dapper_high: $dapper_high,
+              dapper_secrets: $dapper_secrets,
+              dapper_applicable_critical: $dapper_applicable_critical,
+              dapper_applicable_high: $dapper_applicable_high,
+              dapper_applicable_secrets: $dapper_applicable_secrets,
+              dapper_reviewed: $dapper_reviewed,
+              dapper_vex_statements: $dapper_vex_statements,
+              reviewed_vulnerabilities: {
+                "CVE-2026-69247": $reviewed_69247,
+                "CVE-2026-69249": $reviewed_69249
+              },
+              kubernetes_dns: {
+                cluster_dns: {critical: $cluster_dns_critical, high: $cluster_dns_high, secrets: $cluster_dns_secrets},
+                etcd: {
+                  critical: $etcd_critical,
+                  high: $etcd_high,
+                  secrets: $etcd_secrets,
+                  components: $etcd_components,
+                  version: $etcd_version,
+                  upstream_version: $etcd_upstream_version,
+                  source_revision: $etcd_source_revision,
+                  source_tree: $etcd_source_tree,
+                  storage_backend: "etcd3"
+                },
+                integration_passed: $dns_integration_passed
+              }
+            }' > dist/security-counts.json
+          {
+            printf 'target\tvulnerability\tpackage\tinstalled\tfixed\tseverity\n'
+            jq -r '.Results[]? as $result | $result.Vulnerabilities[]? |
+              select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+              [$result.Target, .VulnerabilityID, .PkgName, .InstalledVersion, (.FixedVersion // ""), .Severity] |
+              @tsv' dist/dapper.raw.json
+          } > dist/dapper-high-critical-findings.tsv
+          {
+            printf 'target\tvulnerability\tpackage\tinstalled\tfixed\tseverity\n'
+            jq -r '.Results[]? as $result | $result.Vulnerabilities[]? |
+              select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+              [$result.Target, .VulnerabilityID, .PkgName, .InstalledVersion, (.FixedVersion // ""), .Severity] |
+              @tsv' dist/dapper.applicable.json
+          } > dist/dapper-applicable-high-critical-findings.tsv
+          sha256sum dist/*.json dist/*.tsv dist/*.lock dist/*.txt dist/*.log dist/*.sha256 | \
+            LC_ALL=C sort -k2 > dist/SHA256SUMS
+          {
+            echo '## kubernetes-package security release gate'
+            echo
+            printf '%s%s%s\n' '- Source revision: `' "$GITHUB_SHA" '`'
+            echo '- Candidate version: `v1.12.11`'
+            echo '- Ubuntu APT snapshot: `20260808T000000Z`'
+            printf '%s%s%s\n' '- Candidate raw reviewed High findings: `' "$raw_high" '`'
+            echo '- Candidate applicable Critical/High/secret findings after OpenVEX: 0'
+            printf '%s%s%s\n' '- Build-environment raw reviewed Critical/High findings: `' "$dapper_critical/$dapper_high" '`'
+            printf '%s%s%s\n' '- Build-environment applicable Critical/High/secret findings after OpenVEX: `' "$dapper_applicable_critical/$dapper_applicable_high/$dapper_applicable_secrets" '`'
+            printf '%s%s%s\n' '- Cluster DNS Critical/High/secret findings: `' "$cluster_dns_critical/$cluster_dns_high/$cluster_dns_secrets" '`'
+            printf '%s%s%s\n' '- etcd integration Critical/High/secret findings: `' "$etcd_critical/$etcd_high/$etcd_secrets" '`'
+            printf '%s%s%s\n' '- etcd integration CycloneDX components: `' "$etcd_components" '`'
+            echo '- Kubernetes 1.12 API Server uses `etcd3` against exact etcd `3.7.2`; DNS integration and least-privilege gate: passed'
+            echo
+            echo '### Evidence SHA-256'
+            echo '```text'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload short-lived SBOM and scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: kubernetes-package-security-evidence-${{ github.run_id }}
+          path: |
+            dist/*.json
+            dist/*.tsv
+            dist/*.lock
+            dist/*.txt
+            dist/*.log
+            dist/*.sha256
+            dist/images
+            dist/SHA256SUMS
+            dist/source-revision.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          include-hidden-files: false
+
+      - name: Enforce the recorded security result
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .source_secrets == 0 and
+            .candidate_raw_critical == 0 and
+            .candidate_applicable_critical == 0 and
+            .candidate_applicable_high == 0 and
+            .candidate_applicable_secrets == 0 and
+            .dapper_applicable_critical == 0 and
+            .dapper_applicable_high == 0 and
+            .dapper_applicable_secrets == 0 and
+            .dapper_reviewed == .dapper_vex_statements and
+            .dapper_vex_statements == 46 and
+            .reviewed_vulnerabilities["CVE-2026-69247"] >= 1 and
+            .reviewed_vulnerabilities["CVE-2026-69249"] >= 1 and
+            .kubernetes_dns.cluster_dns.critical == 0 and
+            .kubernetes_dns.cluster_dns.high == 0 and
+            .kubernetes_dns.cluster_dns.secrets == 0 and
+            .kubernetes_dns.etcd.critical == 0 and
+            .kubernetes_dns.etcd.high == 0 and
+            .kubernetes_dns.etcd.secrets == 0 and
+            .kubernetes_dns.etcd.components > 0 and
+            .kubernetes_dns.etcd.version == "3.7.2" and
+            .kubernetes_dns.etcd.upstream_version == "3.7.1" and
+            .kubernetes_dns.etcd.source_revision == "24c626275522fbc3a4c9683cc90ff489b2b366de" and
+            .kubernetes_dns.etcd.source_tree == "9bbe6c138bd005fd2798d842ebfaae3aeac5579c" and
+            .kubernetes_dns.etcd.storage_backend == "etcd3" and
+            .kubernetes_dns.integration_passed == true
+          ' dist/security-counts.json >/dev/null
+
+      - name: Remove verification-only images and build cache
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker image rm -f "$IMAGE" "$DAPPER_IMAGE" "$TRIVY_IMAGE" \
+            "$ETCD_TEST_IMAGE" "$CLUSTER_DNS_IMAGE" "$CLUSTER_DNS_BASE_IMAGE"
+          docker builder prune --all --force

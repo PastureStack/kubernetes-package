@@ -2,8 +2,9 @@
 set -e
 
 mkdir -p bin dist
+git config --global --add safe.directory "${DAPPER_SOURCE:-/source}" 2>/dev/null || true
 if [ -e ./scripts/$1 ]; then
-    ./scripts/"$@"
+    bash ./scripts/"$@"
 else
     exec "$@"
 fi

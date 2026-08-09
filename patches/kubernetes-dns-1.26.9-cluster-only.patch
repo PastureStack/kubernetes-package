@@ -1,0 +1,37 @@
+diff --git a/pkg/dns/config/config.go b/pkg/dns/config/config.go
+--- a/pkg/dns/config/config.go
++++ b/pkg/dns/config/config.go
+@@ -21,8 +21,7 @@ import (
+ 	"net"
+ 	"strconv"
+ 
+-	"github.com/coredns/coredns/plugin/pkg/parse"
+ 	types "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/util/validation"
+ 	"k8s.io/apimachinery/pkg/util/validation/field"
+ 	fed "k8s.io/dns/pkg/dns/federation"
+@@ -133,24 +132,2 @@ func (config *Config) validateUpstreamNameserver() error {
+ 	return nil
+ }
+-
+-// validateForwardProxy returns nil if the nameservers are valid proxy addresses
+-// for the CoreDNS plugin forward.
+-// The function is ported from coredns/plugin/forward:parseStanza
+-func validateForwardProxy(nameservers ...string) error {
+-	if len(nameservers) == 0 {
+-		return nil
+-	}
+-	hosts, err := parse.HostPortOrFile(nameservers...)
+-	if err != nil {
+-		return err
+-	}
+-	for _, host := range hosts {
+-		trans, _ := parse.Transport(host)
+-		switch trans {
+-		case "dns", "tls":
+-		default:
+-			return fmt.Errorf("unsupported transport %s of nameserver %s", trans, host)
+-		}
+-	}
+-	return nil
+-}

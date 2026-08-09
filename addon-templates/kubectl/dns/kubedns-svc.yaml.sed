@@ -31,7 +31,9 @@ spec:
   ports:
   - name: dns
     port: 53
+    targetPort: dns-local
     protocol: UDP
   - name: dns-tcp
     port: 53
+    targetPort: dns-tcp-local
     protocol: TCP

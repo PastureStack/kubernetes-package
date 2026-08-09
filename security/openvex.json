@@ -1,0 +1,35 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/PastureStack/kubernetes-package/security/openvex/v1.12.11",
+  "author": "PastureStack Security",
+  "timestamp": "2026-08-08T17:41:09Z",
+  "version": 5,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-69247"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/cryptography@48.0.1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The image has no consumer outside the cryptography package that calls pkcs7_decrypt_der, pkcs7_decrypt_pem, or pkcs7_decrypt_smime, and it does not expose an attacker-controlled PKCS#7 EnvelopedData decryption service."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-69249"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/cryptography@48.0.1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Azure CLI 2.89.0 requires MSAL 1.36.0 and the mutually compatible cryptography series below 49. The image does not accept or validate attacker-supplied certificate chains, and the release-blocking exact-filesystem audit finds no caller of cryptography.x509.verification, PolicyBuilder, or the client/server verifier builders outside the cryptography package."
+    }
+  ]
+}
