@@ -259,7 +259,7 @@ for workflow_marker in \
     'git -C "$source_dir" fetch --depth=1 --no-tags origin "$ETCD_TEST_SOURCE_REVISION"' \
     '--output /evidence/etcd-integration.raw.json' \
     '--output /evidence/etcd-integration.cdx.json' \
-    "--tmpfs '/tmp:rw,noexec,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=0700'" \
+    "--tmpfs '/tmp:rw,noexec,nosuid,nodev,size=256m,uid=65532,gid=65532,mode=0700'" \
     '--storage-backend=etcd3' \
     '.kubernetes_dns.etcd.version == "3.7.2"' \
     '.kubernetes_dns.etcd.upstream_version == "3.7.1"' \

@@ -398,7 +398,7 @@ jobs:
           docker network create --internal "$network" >/dev/null
           docker run -d --name "$etcd_container" --network "$network" \
             --network-alias etcd \
-            --tmpfs '/tmp:rw,noexec,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=0700' \
+            --tmpfs '/tmp:rw,noexec,nosuid,nodev,size=256m,uid=65532,gid=65532,mode=0700' \
             --entrypoint /usr/local/bin/etcd \
             "$ETCD_TEST_IMAGE" \
             --name=dns-test \
