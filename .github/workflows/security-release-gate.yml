@@ -603,7 +603,9 @@ jobs:
             length' dist/dapper.raw.json)
           dapper_vex_statements=$(jq '.statements | length' dist/dapper-openvex.json)
           reviewed_69247=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69247")] | length' dist/kubernetes-package.raw.json)
-          reviewed_69249=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249")] | length' dist/kubernetes-package.raw.json)
+          scanner_69249=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249")] | length' dist/kubernetes-package.raw.json)
+          scanner_69249_exact=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249" and .PkgName == "cryptography" and .InstalledVersion == "48.0.1")] | length' dist/kubernetes-package.raw.json)
+          unexpected_69249=$((scanner_69249 - scanner_69249_exact))
           cluster_dns_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/cluster-dns.raw.json)
           cluster_dns_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/cluster-dns.raw.json)
           cluster_dns_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/cluster-dns.raw.json)
@@ -628,7 +630,9 @@ jobs:
             --argjson dapper_reviewed "$dapper_reviewed" \
             --argjson dapper_vex_statements "$dapper_vex_statements" \
             --argjson reviewed_69247 "$reviewed_69247" \
-            --argjson reviewed_69249 "$reviewed_69249" \
+            --argjson scanner_69249 "$scanner_69249" \
+            --argjson scanner_69249_exact "$scanner_69249_exact" \
+            --argjson unexpected_69249 "$unexpected_69249" \
             --argjson cluster_dns_critical "$cluster_dns_critical" \
             --argjson cluster_dns_high "$cluster_dns_high" \
             --argjson cluster_dns_secrets "$cluster_dns_secrets" \
@@ -657,8 +661,14 @@ jobs:
               dapper_reviewed: $dapper_reviewed,
               dapper_vex_statements: $dapper_vex_statements,
               reviewed_vulnerabilities: {
-                "CVE-2026-69247": $reviewed_69247,
-                "CVE-2026-69249": $reviewed_69249
+                "CVE-2026-69247": $reviewed_69247
+              },
+              scanner_out_of_range_findings: {
+                "CVE-2026-69249": {
+                  total: $scanner_69249,
+                  exact_cryptography_48_0_1: $scanner_69249_exact,
+                  unexpected: $unexpected_69249
+                }
               },
               kubernetes_dns: {
                 cluster_dns: {critical: $cluster_dns_critical, high: $cluster_dns_high, secrets: $cluster_dns_secrets},
@@ -698,7 +708,8 @@ jobs:
             printf '%s%s%s\n' '- Source revision: `' "$GITHUB_SHA" '`'
             echo '- Candidate version: `v1.12.11`'
             echo '- Ubuntu APT snapshot: `20260808T000000Z`'
-            printf '%s%s%s\n' '- Candidate raw reviewed High findings: `' "$raw_high" '`'
+            printf '%s%s%s\n' '- Candidate raw High findings before OpenVEX: `' "$raw_high" '`'
+            printf '%s%s%s\n' '- Candidate scanner out-of-range CVE-2026-69249 findings for exact cryptography 48.0.1: `' "$scanner_69249_exact" '`'
             echo '- Candidate applicable Critical/High/secret findings after OpenVEX: 0'
             printf '%s%s%s\n' '- Build-environment raw reviewed Critical/High findings: `' "$dapper_critical/$dapper_high" '`'
             printf '%s%s%s\n' '- Build-environment applicable Critical/High/secret findings after OpenVEX: `' "$dapper_applicable_critical/$dapper_applicable_high/$dapper_applicable_secrets" '`'
@@ -749,7 +760,8 @@ jobs:
             .dapper_reviewed == .dapper_vex_statements and
             .dapper_vex_statements == 46 and
             .reviewed_vulnerabilities["CVE-2026-69247"] >= 1 and
-            .reviewed_vulnerabilities["CVE-2026-69249"] >= 1 and
+            .scanner_out_of_range_findings["CVE-2026-69249"].unexpected == 0 and
+            .scanner_out_of_range_findings["CVE-2026-69249"].total == .scanner_out_of_range_findings["CVE-2026-69249"].exact_cryptography_48_0_1 and
             .kubernetes_dns.cluster_dns.critical == 0 and
             .kubernetes_dns.cluster_dns.high == 0 and
             .kubernetes_dns.cluster_dns.secrets == 0 and

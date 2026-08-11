@@ -24,13 +24,6 @@ REVIEWED_EXTERNAL_CALLS = {
         b"pkcs7_decrypt_pem",
         b"pkcs7_decrypt_smime",
     ),
-    "CVE-2026-69249": (
-        b"cryptography.x509.verification",
-        b"x509 import verification",
-        b"PolicyBuilder(",
-        b"build_client_verifier",
-        b"build_server_verifier",
-    ),
 }
 
 
@@ -67,13 +60,10 @@ if hits:
 # Prove the reviewed symbols and search root exist. An empty or broken search
 # must never be mistaken for a successful reachability result.
 from cryptography.hazmat.primitives.serialization import pkcs7  # noqa: E402
-from cryptography.x509 import verification  # noqa: E402
 
 for symbol in ("pkcs7_decrypt_der", "pkcs7_decrypt_pem", "pkcs7_decrypt_smime"):
     if not hasattr(pkcs7, symbol):
         fail(f"reviewed_symbol_missing=cryptography.pkcs7.{symbol}")
-if not hasattr(verification, "PolicyBuilder"):
-    fail("reviewed_symbol_missing=cryptography.x509.verification.PolicyBuilder")
 
 with tempfile.TemporaryDirectory(prefix="pasturestack-azure-security-") as config_dir:
     environment = os.environ.copy()

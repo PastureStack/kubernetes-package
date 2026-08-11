@@ -8,7 +8,8 @@ for script in package/*.sh package/update-platform-ca package/runc-1.10 \
     scripts/entry scripts/package scripts/release scripts/version scripts/tiller-release-backup \
     scripts/generate-dapper-openvex scripts/prepare-cluster-dns-source \
     scripts/verify-go-toolchain-compatibility tests/test-tiller-release-backup.sh \
-    tests/test-tiller-upgrade.sh tests/test-addon-upgrade.sh tests/test-release-gate.sh; do
+    tests/test-tiller-upgrade.sh tests/test-addon-upgrade.sh tests/test-release-gate.sh \
+    tests/test-security-advisory-classification.sh; do
     bash -n "${script}"
 done
 
@@ -206,7 +207,19 @@ if ! jq -e '
     .statements | length == 2 and
     ([.[].vulnerability.name] | sort == ["CVE-2026-69247", "CVE-2026-69249"]) and
     all(.[].products[]; .["@id"] == "pkg:pypi/cryptography@48.0.1") and
-    all(.[]; .status == "not_affected" and .justification == "vulnerable_code_not_in_execute_path")
+    ([.[] | select(
+      .vulnerability.name == "CVE-2026-69247" and
+      .status == "not_affected" and
+      .justification == "vulnerable_code_not_in_execute_path"
+    )] | length == 1) and
+    ([.[] | select(
+      .vulnerability.name == "CVE-2026-69249" and
+      .status == "not_affected" and
+      .justification == "vulnerable_code_not_present" and
+      (.impact_statement | contains("<=48.0.0")) and
+      (.impact_statement | contains("48.0.1")) and
+      (.impact_statement | contains("49.0.0"))
+    )] | length == 1)
 ' security/openvex.json >/dev/null; then
     echo "KUBERNETES_PACKAGE_OPENVEX_REVIEW_INVALID" >&2
     exit 1
@@ -290,6 +303,9 @@ for workflow_marker in \
     'Enforce the recorded security result' \
     '.dapper_applicable_high == 0' \
     '.dapper_reviewed == .dapper_vex_statements' \
+    'scanner_out_of_range_findings' \
+    'select(.VulnerabilityID == "CVE-2026-69249" and .PkgName == "cryptography" and .InstalledVersion == "48.0.1")' \
+    '.scanner_out_of_range_findings["CVE-2026-69249"].unexpected == 0' \
     'retention-days: 7'; do
     if ! grep -Fq -- "${workflow_marker}" "${security_workflow}"; then
         echo "KUBERNETES_PACKAGE_SECURITY_WORKFLOW_MARKER_MISSING marker=${workflow_marker}" >&2
@@ -411,4 +427,5 @@ bash tests/test-tiller-upgrade.sh
 bash tests/test-tiller-release-backup.sh
 bash tests/test-addon-upgrade.sh
 bash tests/test-release-gate.sh
+bash tests/test-security-advisory-classification.sh
 echo "KUBERNETES_PACKAGE_MIGRATION_VALIDATION_OK"

@@ -2,8 +2,8 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://github.com/PastureStack/kubernetes-package/security/openvex/v1.12.11",
   "author": "PastureStack Security",
-  "timestamp": "2026-08-08T17:41:09Z",
-  "version": 5,
+  "timestamp": "2026-08-11T18:26:15Z",
+  "version": 6,
   "statements": [
     {
       "vulnerability": {
@@ -28,8 +28,8 @@
         }
       ],
       "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Azure CLI 2.89.0 requires MSAL 1.36.0 and the mutually compatible cryptography series below 49. The image does not accept or validate attacker-supplied certificate chains, and the release-blocking exact-filesystem audit finds no caller of cryptography.x509.verification, PolicyBuilder, or the client/server verifier builders outside the cryptography package."
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The GitHub Reviewed Advisory range for CVE-2026-69249 is cryptography <=48.0.0 and the first patched version is 49.0.0. This image installs exact cryptography 48.0.1, which is outside the affected range; any scanner record for this exact package and version is an out-of-range finding."
     }
   ]
 }
