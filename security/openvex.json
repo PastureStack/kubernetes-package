@@ -2,8 +2,9 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://github.com/PastureStack/kubernetes-package/security/openvex/v1.12.11",
   "author": "PastureStack Security",
-  "timestamp": "2026-08-11T18:26:15Z",
-  "version": 6,
+  "timestamp": "2026-08-16T03:36:02Z",
+  "version": 7,
+  "x-pasturestack-expires": "2026-09-15T00:00:00Z",
   "statements": [
     {
       "vulnerability": {
@@ -28,8 +29,8 @@
         }
       ],
       "status": "not_affected",
-      "justification": "vulnerable_code_not_present",
-      "impact_statement": "The GitHub Reviewed Advisory range for CVE-2026-69249 is cryptography <=48.0.0 and the first patched version is 49.0.0. This image installs exact cryptography 48.0.1, which is outside the affected range; any scanner record for this exact package and version is an out-of-range finding."
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The CVE CNA record classifies cryptography <49.0.0 as affected, while the current GitHub advisory package range says <=48.0.0; this assessment conservatively treats 48.0.1 as affected. The image has no consumer outside cryptography that references cryptography.x509.verification, PolicyBuilder, build_client_verifier, or build_server_verifier, and the reviewed Azure CLI command paths do not expose attacker-controlled certificate-chain validation. The image build rechecks all installed consumer files and this assessment expires on 2026-09-15."
     }
   ]
 }

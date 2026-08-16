@@ -1,6 +1,7 @@
 #!/opt/az/bin/python3
 """Fail the image build when reviewed Azure Python security assumptions drift."""
 
+import datetime
 import importlib.metadata
 import json
 import os
@@ -11,18 +12,30 @@ import tempfile
 
 
 EXPECTED_VERSIONS = {
-    "azure-cli": "2.89.0",
-    "azure-cli-core": "2.89.0",
+    "azure-cli": "2.89.1",
+    "azure-cli-core": "2.89.1",
     "cryptography": "48.0.1",
     "msal": "1.36.0",
     "pyOpenSSL": "26.2.0",
 }
+
+VEX_REVIEW_EXPIRES = "2026-09-15T00:00:00Z"
+VEX_REVIEW_EXPIRES_UTC = datetime.datetime.fromisoformat(
+    VEX_REVIEW_EXPIRES.replace("Z", "+00:00")
+)
 
 REVIEWED_EXTERNAL_CALLS = {
     "CVE-2026-69247": (
         b"pkcs7_decrypt_der",
         b"pkcs7_decrypt_pem",
         b"pkcs7_decrypt_smime",
+    ),
+    "CVE-2026-69249": (
+        b"cryptography.x509.verification",
+        b"from cryptography.x509 import verification",
+        b"PolicyBuilder",
+        b"build_client_verifier",
+        b"build_server_verifier",
     ),
 }
 
@@ -37,20 +50,39 @@ for distribution, expected in EXPECTED_VERSIONS.items():
     if actual != expected:
         fail(f"distribution={distribution} expected={expected} actual={actual}")
 
+if datetime.datetime.now(datetime.timezone.utc) >= VEX_REVIEW_EXPIRES_UTC:
+    fail(f"vex_review_expired={VEX_REVIEW_EXPIRES}")
+
 site_packages = Path(importlib.metadata.distribution("cryptography").locate_file(""))
 if not site_packages.is_dir():
     fail(f"site_packages_missing={site_packages}")
 
 hits = []
-for path in sorted(site_packages.rglob("*.py")):
-    relative = path.relative_to(site_packages)
-    if relative.parts and relative.parts[0] == "cryptography":
+scanned_files = 0
+for path in sorted(site_packages.rglob("*")):
+    if not path.is_file():
         continue
-    data = path.read_bytes()
+    relative = path.relative_to(site_packages)
+    if relative.parts and (
+        relative.parts[0] == "cryptography"
+        or (
+            relative.parts[0].startswith("cryptography-")
+            and relative.parts[0].endswith(".dist-info")
+        )
+    ):
+        continue
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        fail(f"consumer_file_unreadable={relative.as_posix()} error={error}")
+    scanned_files += 1
     for vulnerability, tokens in REVIEWED_EXTERNAL_CALLS.items():
         for token in tokens:
             if token in data:
                 hits.append((vulnerability, relative.as_posix(), token.decode("ascii")))
+
+if scanned_files == 0:
+    fail("consumer_files_scanned=0")
 
 if hits:
     for vulnerability, path, token in hits:
@@ -60,10 +92,18 @@ if hits:
 # Prove the reviewed symbols and search root exist. An empty or broken search
 # must never be mistaken for a successful reachability result.
 from cryptography.hazmat.primitives.serialization import pkcs7  # noqa: E402
+from cryptography.x509 import verification  # noqa: E402
 
 for symbol in ("pkcs7_decrypt_der", "pkcs7_decrypt_pem", "pkcs7_decrypt_smime"):
     if not hasattr(pkcs7, symbol):
         fail(f"reviewed_symbol_missing=cryptography.pkcs7.{symbol}")
+
+for symbol in ("PolicyBuilder", "Store", "VerificationError"):
+    if not hasattr(verification, symbol):
+        fail(f"reviewed_symbol_missing=cryptography.x509.verification.{symbol}")
+for symbol in ("build_client_verifier", "build_server_verifier"):
+    if not hasattr(verification.PolicyBuilder, symbol):
+        fail(f"reviewed_symbol_missing=cryptography.x509.verification.PolicyBuilder.{symbol}")
 
 with tempfile.TemporaryDirectory(prefix="pasturestack-azure-security-") as config_dir:
     environment = os.environ.copy()
@@ -100,5 +140,7 @@ with tempfile.TemporaryDirectory(prefix="pasturestack-azure-security-") as confi
 
 print(
     "KUBERNETES_PACKAGE_AZURE_PYTHON_SECURITY_OK "
-    "versions=exact external_vulnerable_api_references=0 commands=registered"
+    f"versions=exact consumer_files_scanned={scanned_files} "
+    "external_vulnerable_api_references=0 reviewed_cves=2 "
+    f"vex_review_expires={VEX_REVIEW_EXPIRES} commands=registered"
 )

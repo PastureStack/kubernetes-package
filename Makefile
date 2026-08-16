@@ -1,11 +1,11 @@
 TARGETS := $(shell ls scripts)
 
-DAPPER_IMAGE ?= pasturestack-kubernetes-package-dapper:go1.26.5-docker29.6.2-ubuntu26
+DAPPER_IMAGE ?= pasturestack-kubernetes-package-dapper:go1.26.6-docker29.7.2-ubuntu26
 DAPPER_HOST_ARCH ?= amd64
-GO_VERSION ?= 1.26.5
-GO_LINUX_AMD64_SHA256 ?= 5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
-DOCKER_VERSION ?= 29.6.2
-DOCKER_LINUX_AMD64_SHA256 ?= d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74
+GO_VERSION ?= 1.26.6
+GO_LINUX_AMD64_SHA256 ?= 708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89
+DOCKER_VERSION ?= 29.7.2
+DOCKER_LINUX_AMD64_SHA256 ?= 803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f
 
 .PHONY: $(TARGETS) dapper-image
 

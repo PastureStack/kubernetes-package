@@ -15,7 +15,7 @@ done
 
 required_markers=(
     'FROM ubuntu:26.04'
-    'docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144 AS snapshot-ca-certificates'
+    'docker:29.7.2-cli@sha256:000bb62ff495f986c9f5578eb67cc2cb98b91138eda81d7762d5371eb8a497fe AS snapshot-ca-certificates'
     'ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03'
     "UBUNTU_APT_SNAPSHOT='20260808T000000Z'"
     'COPY package/ubuntu-apt.lock /licenses/ubuntu-apt.lock'
@@ -48,8 +48,8 @@ required_markers=(
     'KUBERNETES_SERVER_SHA256=f3df06f9bf2e4c4e8b5aba16d44197e26672aa06e8c24ab9f6ab4eaf64ab068e'
     'kubernetes-v1.12.10-docker29-cgroupv2.patch'
     'kubernetes-v1.12.10-go1.26.patch'
-    'GO_VERSION=1.26.5'
-    'GO_LINUX_AMD64_SHA256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053'
+    'GO_VERSION=1.26.6'
+    'GO_LINUX_AMD64_SHA256=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89'
     'GO111MODULE=off'
     'GOTOOLCHAIN=local'
     'KUBERNETES_GOPATH=${KUBERNETES_BUILD_ROOT}/gopath'
@@ -65,11 +65,11 @@ required_markers=(
     'cmp "_output/local/bin/linux/amd64/${binary}.first"'
     '-trimpath'
     'KUBERNETES_PACKAGE_NON_REPRODUCIBLE_PATH_PRESENT'
-    'DOCKER_VERSION=29.6.2'
-    'DOCKER_LINUX_AMD64_SHA256=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74'
-    'AZURE_CLI_VERSION=2.89.0'
-    'AZURE_CLI_DEB_VERSION=2.89.0-1~noble'
-    'AZURE_CLI_DEB_SHA256=5244e06ecb7c77a97d58bdb782e23445a3b123fb4422bb56810428131bc8f902'
+    'DOCKER_VERSION=29.7.2'
+    'DOCKER_LINUX_AMD64_SHA256=803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f'
+    'AZURE_CLI_VERSION=2.89.1'
+    'AZURE_CLI_DEB_VERSION=2.89.1-1~noble'
+    'AZURE_CLI_DEB_SHA256=3608abe64c5c1a407d468b790a2187b26d4df7f709f747414d19143d909e45da'
     'CRYPTOGRAPHY_VERSION=48.0.1'
     'CRYPTOGRAPHY_WHEEL_SHA256=0ee6ea481db1ab889cba043ec1eda17bb9c1ea79db6722f779c3667f9f70322f'
     'PYOPENSSL_VERSION=26.2.0'
@@ -87,7 +87,7 @@ required_markers=(
     'CNI_SOURCE_DATE_EPOCH=1771500712'
     'CNI_SOURCE_ARCHIVE_SHA256=3b723ab805f716f03820dfeee4289181d9ade76a34d628f9bb36120e44fe767e'
     'CNI_LICENSE_SHA256=b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1'
-    'CNI_BUILD_GO_VERSION=1.26.5'
+    'CNI_BUILD_GO_VERSION=1.26.6'
     '/licenses/CNI-LICENSE'
     'https://codeload.github.com/containernetworking/plugins/tar.gz/${CNI_SOURCE_COMMIT}'
     'GOPROXY=off GOSUMDB=off'
@@ -203,22 +203,29 @@ if grep -R --exclude=validate -Fq 'cni-plugins-linux-amd64' \
     exit 1
 fi
 
-if ! jq -e '
-    .statements | length == 2 and
-    ([.[].vulnerability.name] | sort == ["CVE-2026-69247", "CVE-2026-69249"]) and
-    all(.[].products[]; .["@id"] == "pkg:pypi/cryptography@48.0.1") and
-    ([.[] | select(
+review_expires='2026-09-15T00:00:00Z'
+if [ "$(date -u +%s)" -ge "$(date -u -d "${review_expires}" +%s)" ]; then
+    echo "KUBERNETES_PACKAGE_OPENVEX_REVIEW_EXPIRED" >&2
+    exit 1
+fi
+if ! jq -e --arg expires "${review_expires}" '
+    .["x-pasturestack-expires"] == $expires and
+    (.statements | length == 2) and
+    ([.statements[].vulnerability.name] | sort == ["CVE-2026-69247", "CVE-2026-69249"]) and
+    all(.statements[].products[]; .["@id"] == "pkg:pypi/cryptography@48.0.1") and
+    ([.statements[] | select(
       .vulnerability.name == "CVE-2026-69247" and
       .status == "not_affected" and
       .justification == "vulnerable_code_not_in_execute_path"
     )] | length == 1) and
-    ([.[] | select(
+    ([.statements[] | select(
       .vulnerability.name == "CVE-2026-69249" and
       .status == "not_affected" and
-      .justification == "vulnerable_code_not_present" and
-      (.impact_statement | contains("<=48.0.0")) and
+      .justification == "vulnerable_code_not_in_execute_path" and
+      (.impact_statement | contains("<49.0.0")) and
       (.impact_statement | contains("48.0.1")) and
-      (.impact_statement | contains("49.0.0"))
+      (.impact_statement | contains("PolicyBuilder")) and
+      (.impact_statement | contains("2026-09-15"))
     )] | length == 1)
 ' security/openvex.json >/dev/null; then
     echo "KUBERNETES_PACKAGE_OPENVEX_REVIEW_INVALID" >&2
@@ -250,7 +257,7 @@ for workflow_marker in \
     'group: kubernetes-package-security-${{ github.ref }}-${{ github.sha }}' \
     'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
     'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
-    'TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c' \
+    'TRIVY_IMAGE: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969' \
     'ETCD_TEST_IMAGE: pasturestack/etcd-image:v3.7.2' \
     'ETCD_TEST_UPSTREAM_VERSION: 3.7.1' \
     'ETCD_TEST_SOURCE_REVISION: 24c626275522fbc3a4c9683cc90ff489b2b366de' \
@@ -278,7 +285,7 @@ for workflow_marker in \
     "test \"\$(docker image inspect \"\$CLUSTER_DNS_IMAGE\" --format '{{.Config.User}}')\" = '65532:65532'" \
     "grep -Fx 'KUBE_FEATURE_WatchListClient=false'" \
     '--output /evidence/cluster-dns.raw.json' \
-    "Version: 0.73.0" \
+    "Version: 0.74.0" \
     '--network none' \
     '--vex /workspace/security/openvex.json' \
     '--vex /workspace/dist/dapper-openvex.json' \
@@ -303,9 +310,11 @@ for workflow_marker in \
     'Enforce the recorded security result' \
     '.dapper_applicable_high == 0' \
     '.dapper_reviewed == .dapper_vex_statements' \
-    'scanner_out_of_range_findings' \
-    'select(.VulnerabilityID == "CVE-2026-69249" and .PkgName == "cryptography" and .InstalledVersion == "48.0.1")' \
-    '.scanner_out_of_range_findings["CVE-2026-69249"].unexpected == 0' \
+    'vex_expires=$(jq -er' \
+    'reviewed_69249_exact' \
+    'unexpected_reviewed_vulnerability_findings' \
+    '.unexpected_reviewed_vulnerability_findings["CVE-2026-69249"] == 0' \
+    '(.reviewed_vulnerabilities | has("CVE-2026-69249"))' \
     'retention-days: 7'; do
     if ! grep -Fq -- "${workflow_marker}" "${security_workflow}"; then
         echo "KUBERNETES_PACKAGE_SECURITY_WORKFLOW_MARKER_MISSING marker=${workflow_marker}" >&2

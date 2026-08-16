@@ -20,7 +20,7 @@ jobs:
       IMAGE: pasturestack/kubernetes-package:v1.12.11
       TAG: v1.12.11
       KUBERNETES_BINARY_VERSION: v1.12.11
-      TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
+      TRIVY_IMAGE: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
       TRIVY_CACHE: /tmp/pasturestack-trivy-cache
       ETCD_TEST_IMAGE: pasturestack/etcd-image:v3.7.2
       ETCD_TEST_VERSION: 3.7.2
@@ -63,7 +63,7 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.version"}}')" = 'v1.9.1'
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.revision"}}')" = 'adc3e6b5b581638afbd194cf2e9319ecbb0151a1'
-          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.go.version"}}')" = '1.26.5'
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.go.version"}}')" = '1.26.6'
           for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler; do
             test "$(docker run --rm --entrypoint "/usr/bin/${binary}" "$IMAGE" --version)" = \
               "Kubernetes ${KUBERNETES_BINARY_VERSION}"
@@ -77,7 +77,7 @@ jobs:
           echo 'b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1  dist/CNI-LICENSE.txt' | sha256sum -c -
           test "$(sha256sum "${RUNNER_TEMP}/cni-loopback.image" | cut -d' ' -f1)" = \
             "$(cut -d' ' -f1 dist/cni-loopback.sha256)"
-          grep -F 'go1.26.5' dist/cni-loopback-go-version.txt
+          grep -F 'go1.26.6' dist/cni-loopback-go-version.txt
           grep -F 'CNI loopback plugin v1.9.1' dist/cni-loopback-version.txt
           docker run --rm --entrypoint /opt/loopback/bin/loopback "$IMAGE" 2>&1 | \
             grep -F 'CNI loopback plugin v1.9.1'
@@ -205,11 +205,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          vex_expires=$(jq -er '.["x-pasturestack-expires"]' security/openvex.json)
+          test "$(date -u +%s)" -lt "$(date -u -d "$vex_expires" +%s)"
+          jq -e --arg expires "$vex_expires" '
+            .["x-pasturestack-expires"] == $expires and
+            (.statements | length == 2) and
+            ([.statements[].vulnerability.name] | sort == ["CVE-2026-69247", "CVE-2026-69249"]) and
+            all(.statements[];
+              .products == [{"@id": "pkg:pypi/cryptography@48.0.1"}] and
+              .status == "not_affected" and
+              .justification == "vulnerable_code_not_in_execute_path")
+          ' security/openvex.json >/dev/null
           mkdir -p "$TRIVY_CACHE"
           docker pull "$TRIVY_IMAGE"
           docker image inspect "$TRIVY_IMAGE" --format '{{join .RepoDigests "\n"}}' |
-            grep -Fq 'aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c'
-          test "$(docker run --rm "$TRIVY_IMAGE" --version)" = 'Version: 0.73.0'
+            grep -Fq 'aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969'
+          test "$(docker run --rm "$TRIVY_IMAGE" --version)" = 'Version: 0.74.0'
           bash scripts/generate-dapper-openvex > dist/dapper-openvex.json
           test "$(jq '.statements | length' dist/dapper-openvex.json)" = 46
 
@@ -603,9 +614,8 @@ jobs:
             length' dist/dapper.raw.json)
           dapper_vex_statements=$(jq '.statements | length' dist/dapper-openvex.json)
           reviewed_69247=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69247")] | length' dist/kubernetes-package.raw.json)
-          scanner_69249=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249")] | length' dist/kubernetes-package.raw.json)
-          scanner_69249_exact=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249" and .PkgName == "cryptography" and .InstalledVersion == "48.0.1")] | length' dist/kubernetes-package.raw.json)
-          unexpected_69249=$((scanner_69249 - scanner_69249_exact))
+          reviewed_69249_exact=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249" and .PkgName == "cryptography" and .InstalledVersion == "48.0.1")] | length' dist/kubernetes-package.raw.json)
+          unexpected_69249=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-69249" and (.PkgName != "cryptography" or .InstalledVersion != "48.0.1"))] | length' dist/kubernetes-package.raw.json)
           cluster_dns_critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' dist/cluster-dns.raw.json)
           cluster_dns_high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' dist/cluster-dns.raw.json)
           cluster_dns_secrets=$(jq '[.Results[]?.Secrets[]?] | length' dist/cluster-dns.raw.json)
@@ -630,8 +640,7 @@ jobs:
             --argjson dapper_reviewed "$dapper_reviewed" \
             --argjson dapper_vex_statements "$dapper_vex_statements" \
             --argjson reviewed_69247 "$reviewed_69247" \
-            --argjson scanner_69249 "$scanner_69249" \
-            --argjson scanner_69249_exact "$scanner_69249_exact" \
+            --argjson reviewed_69249_exact "$reviewed_69249_exact" \
             --argjson unexpected_69249 "$unexpected_69249" \
             --argjson cluster_dns_critical "$cluster_dns_critical" \
             --argjson cluster_dns_high "$cluster_dns_high" \
@@ -661,14 +670,11 @@ jobs:
               dapper_reviewed: $dapper_reviewed,
               dapper_vex_statements: $dapper_vex_statements,
               reviewed_vulnerabilities: {
-                "CVE-2026-69247": $reviewed_69247
+                "CVE-2026-69247": $reviewed_69247,
+                "CVE-2026-69249": $reviewed_69249_exact
               },
-              scanner_out_of_range_findings: {
-                "CVE-2026-69249": {
-                  total: $scanner_69249,
-                  exact_cryptography_48_0_1: $scanner_69249_exact,
-                  unexpected: $unexpected_69249
-                }
+              unexpected_reviewed_vulnerability_findings: {
+                "CVE-2026-69249": $unexpected_69249
               },
               kubernetes_dns: {
                 cluster_dns: {critical: $cluster_dns_critical, high: $cluster_dns_high, secrets: $cluster_dns_secrets},
@@ -709,7 +715,7 @@ jobs:
             echo '- Candidate version: `v1.12.11`'
             echo '- Ubuntu APT snapshot: `20260808T000000Z`'
             printf '%s%s%s\n' '- Candidate raw High findings before OpenVEX: `' "$raw_high" '`'
-            printf '%s%s%s\n' '- Candidate scanner out-of-range CVE-2026-69249 findings for exact cryptography 48.0.1: `' "$scanner_69249_exact" '`'
+            printf '%s%s%s\n' '- Candidate raw reviewed CVE-2026-69249 findings for exact cryptography 48.0.1: `' "$reviewed_69249_exact" '`'
             echo '- Candidate applicable Critical/High/secret findings after OpenVEX: 0'
             printf '%s%s%s\n' '- Build-environment raw reviewed Critical/High findings: `' "$dapper_critical/$dapper_high" '`'
             printf '%s%s%s\n' '- Build-environment applicable Critical/High/secret findings after OpenVEX: `' "$dapper_applicable_critical/$dapper_applicable_high/$dapper_applicable_secrets" '`'
@@ -760,8 +766,8 @@ jobs:
             .dapper_reviewed == .dapper_vex_statements and
             .dapper_vex_statements == 46 and
             .reviewed_vulnerabilities["CVE-2026-69247"] >= 1 and
-            .scanner_out_of_range_findings["CVE-2026-69249"].unexpected == 0 and
-            .scanner_out_of_range_findings["CVE-2026-69249"].total == .scanner_out_of_range_findings["CVE-2026-69249"].exact_cryptography_48_0_1 and
+            (.reviewed_vulnerabilities | has("CVE-2026-69249")) and
+            .unexpected_reviewed_vulnerability_findings["CVE-2026-69249"] == 0 and
             .kubernetes_dns.cluster_dns.critical == 0 and
             .kubernetes_dns.cluster_dns.high == 0 and
             .kubernetes_dns.cluster_dns.secrets == 0 and
