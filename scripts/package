@@ -60,6 +60,8 @@ else
 fi
 
 build_args=(
+    --label "org.opencontainers.image.version=${TAG}"
+    --label "org.opencontainers.image.revision=${SOURCE_REVISION}"
     --build-arg "IMAGE_VERSION=${TAG}"
     --build-arg "SOURCE_REVISION=${SOURCE_REVISION}"
     --build-arg "KUBERNETES_VERSION=${KUBERNETES_VERSION}"
@@ -91,6 +93,8 @@ for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-sch
 done
 "$CONTAINER_ENGINE" run --rm "$IMAGE" kubectl version --client=true --output=json | grep -Fq "${KUBERNETES_VERSION#v}"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.kubernetes.version"}}')" = "$KUBERNETES_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$TAG"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_REVISION"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.kubernetes.revision"}}')" = "$KUBERNETES_GIT_COMMIT"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.kubernetes.source-sha256"}}')" = "$KUBERNETES_SOURCE_SHA256"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.opentelemetry"}}')" = "$OPENTELEMETRY_VERSION"
