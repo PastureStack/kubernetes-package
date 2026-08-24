@@ -2,185 +2,177 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
-cd "${repo_root}"
+cd "$repo_root"
+
+# dist is generated evidence. Recreate it so a successful run cannot publish
+# stale files from an older image or an interrupted scan.
+rm -rf -- dist
+mkdir -p dist
+
+KUBERNETES_VERSION=${KUBERNETES_VERSION:-v1.36.4}
+KUBERNETES_GIT_COMMIT=${KUBERNETES_GIT_COMMIT:-bb826b1d48562f110659e64e8ec444327433db95}
+KUBERNETES_SOURCE_SHA256=${KUBERNETES_SOURCE_SHA256:-3c28f11492472df48e658551bf268fd92938b127b0f9dcef7090ac800318c821}
+KUBERNETES_LICENSE_SHA256=${KUBERNETES_LICENSE_SHA256:-cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30}
+OPENTELEMETRY_VERSION=${OPENTELEMETRY_VERSION:-v1.45.0}
+OPENTELEMETRY_GRPC_VERSION=${OPENTELEMETRY_GRPC_VERSION:-v0.70.0}
+GRPC_GO_VERSION=${GRPC_GO_VERSION:-v1.83.1}
+CEL_GO_VERSION=${CEL_GO_VERSION:-v0.32.0}
+ETCD_VERSION=${ETCD_VERSION:-v3.7.1}
+ETCD_RAFT_VERSION=${ETCD_RAFT_VERSION:-v3.7.0}
+X_CRYPTO_VERSION=${X_CRYPTO_VERSION:-v0.55.0}
+X_SYS_VERSION=${X_SYS_VERSION:-v0.47.0}
+CNI_VERSION=${CNI_VERSION:-v1.9.1}
+CNI_GIT_COMMIT=${CNI_GIT_COMMIT:-adc3e6b5b581638afbd194cf2e9319ecbb0151a1}
+CNI_GIT_TREE=${CNI_GIT_TREE:-91451a8931a305da27de4df81662ec08af58249e}
+CNI_LICENSE_SHA256=${CNI_LICENSE_SHA256:-b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1}
+CONTAINER_ENGINE=${CONTAINER_ENGINE:-docker}
+
+command -v "$CONTAINER_ENGINE" >/dev/null 2>&1 || {
+    echo "container engine is unavailable: ${CONTAINER_ENGINE}" >&2
+    exit 1
+}
 
 if [ -z "${SOURCE_REVISION:-}" ]; then
-    SOURCE_REVISION=$(git -C "${repo_root}" rev-parse HEAD)
-    if [ -n "$(git -C "${repo_root}" status --porcelain)" ]; then
+    SOURCE_REVISION=$(git rev-parse HEAD)
+    if [ -n "$(git status --porcelain)" ]; then
         SOURCE_REVISION="${SOURCE_REVISION}-dirty"
     fi
 fi
-if ! [[ "${SOURCE_REVISION}" =~ ^[0-9a-f]{40}(-dirty)?$ ]]; then
-    echo "SOURCE_REVISION must be a full Git commit, optionally suffixed with -dirty for a local candidate" >&2
+if ! [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}(-dirty)?$ ]]; then
+    echo 'SOURCE_REVISION must be a full Git commit, optionally suffixed with -dirty' >&2
     exit 1
 fi
 
-ARCH=${ARCH:-"amd64"}
-if [ "${ARCH}" != "amd64" ]; then
-    echo "only the reviewed amd64 package is supported" >&2
+TAG=${TAG:-$KUBERNETES_VERSION}
+IMAGE_NAME=${IMAGE_NAME:-pasturestack/kubernetes-package}
+if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "TAG must use numeric SemVer vMAJOR.MINOR.PATCH: $TAG" >&2
     exit 1
 fi
-
-cd "${repo_root}/package"
-
-KUBERNETES_SOURCE_VERSION=${KUBERNETES_SOURCE_VERSION:-v1.12.10}
-KUBERNETES_SOURCE_COMMIT=${KUBERNETES_SOURCE_COMMIT:-71fde6aadce8b92456b88ee56c21e500f4919f0b}
-KUBERNETES_SOURCE_DATE_EPOCH=1567540757
-KUBERNETES_BINARY_VERSION=${KUBERNETES_BINARY_VERSION:-v1.12.11}
-KUBERNETES_SERVER_SHA256=${KUBERNETES_SERVER_SHA256:-f3df06f9bf2e4c4e8b5aba16d44197e26672aa06e8c24ab9f6ab4eaf64ab068e}
-KUBERNETES_PATCH=../patches/kubernetes-v1.12.10-docker29-cgroupv2.patch
-KUBERNETES_GO_PATCH=../patches/kubernetes-v1.12.10-go1.26.patch
-CNI_VERSION=${CNI_VERSION:-v1.9.1}
-CNI_SOURCE_COMMIT=${CNI_SOURCE_COMMIT:-adc3e6b5b581638afbd194cf2e9319ecbb0151a1}
-CNI_SOURCE_ARCHIVE_SHA256=${CNI_SOURCE_ARCHIVE_SHA256:-3b723ab805f716f03820dfeee4289181d9ade76a34d628f9bb36120e44fe767e}
-CNI_LICENSE_SHA256=${CNI_LICENSE_SHA256:-b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1}
-CNI_BUILD_GO_VERSION=${CNI_BUILD_GO_VERSION:-1.26.6}
-
-if [ "${KUBERNETES_SOURCE_VERSION}" != "v1.12.10" ] || \
-    ! [[ "${KUBERNETES_SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || \
-    ! [[ "${KUBERNETES_BINARY_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
-    ! [[ "${KUBERNETES_SERVER_SHA256}" =~ ^[0-9a-f]{64}$ ]] || \
-    [ "${CNI_VERSION}" != "v1.9.1" ] || \
-    [ "${CNI_SOURCE_COMMIT}" != "adc3e6b5b581638afbd194cf2e9319ecbb0151a1" ] || \
-    [ "${CNI_SOURCE_ARCHIVE_SHA256}" != "3b723ab805f716f03820dfeee4289181d9ade76a34d628f9bb36120e44fe767e" ] || \
-    [ "${CNI_LICENSE_SHA256}" != "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1" ] || \
-    [ "${CNI_BUILD_GO_VERSION}" != "1.26.6" ]; then
-    echo "invalid Kubernetes source or numeric build-version lock" >&2
+if [ "$TAG" != "$KUBERNETES_VERSION" ]; then
+    echo "TAG must equal the packaged Kubernetes version: ${KUBERNETES_VERSION}" >&2
     exit 1
 fi
-
-KUBERNETES_BUILD_ROOT=$(mktemp -d /tmp/pasturestack-kubernetes-build.XXXXXX)
-KUBERNETES_GOPATH=${KUBERNETES_BUILD_ROOT}/gopath
-KUBERNETES_SOURCE_ROOT=${KUBERNETES_GOPATH}/src/k8s.io/kubernetes
-
-cleanup() {
-    rm -f kubectl kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler \
-        loopback CNI-LICENSE LICENSE SECURITY.md ORIGIN.md COMPATIBILITY.md
-    if [ -n "${KUBERNETES_BUILD_ROOT:-}" ]; then
-        rm -rf "${KUBERNETES_BUILD_ROOT}"
-    fi
-}
-trap cleanup EXIT
-
-TAG=${TAG:-${KUBERNETES_BINARY_VERSION}}
-REPO=${REPO:-pasturestack}
-IMAGE_NAME=${IMAGE_NAME:-}
-IMAGE=${IMAGE:-}
-
-if ! [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "TAG must be a numeric semantic version such as v1.12.11" >&2
-    exit 1
+if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
+    IMAGE=$IMAGE_NAME
+else
+    IMAGE="${IMAGE_NAME}:${TAG}"
 fi
 
-echo "${KUBERNETES_SERVER_SHA256}  ${DOWNLOAD}/k8s.tar.gz" | sha256sum -c -
-tar xvzf $DOWNLOAD/k8s.tar.gz --strip-components=3 kubernetes/server/bin/{kubelet,kube-proxy,kube-apiserver,kube-controller-manager,kube-scheduler,kubectl}
-tar xOzf $DOWNLOAD/k8s.tar.gz kubernetes/kubernetes-src.tar.gz > "${KUBERNETES_BUILD_ROOT}/kubernetes-src.tar.gz"
-mkdir -p "${KUBERNETES_SOURCE_ROOT}"
-tar xzf "${KUBERNETES_BUILD_ROOT}/kubernetes-src.tar.gz" \
-    -C "${KUBERNETES_SOURCE_ROOT}"
-
-(
-    cd "${KUBERNETES_SOURCE_ROOT}"
-    patch --batch --forward --fuzz=0 -p1 < "${OLDPWD}/${KUBERNETES_PATCH}"
-    patch --batch --forward --fuzz=0 -p1 < "${OLDPWD}/${KUBERNETES_GO_PATCH}"
-    KUBERNETES_VERSION_FILE="${KUBERNETES_BUILD_ROOT}/version-vars"
-    cat > "${KUBERNETES_VERSION_FILE}" <<EOF
-KUBE_GIT_COMMIT='${KUBERNETES_SOURCE_COMMIT}'
-KUBE_GIT_TREE_STATE='clean'
-KUBE_GIT_VERSION='${KUBERNETES_BINARY_VERSION}'
-KUBE_GIT_MAJOR='1'
-KUBE_GIT_MINOR='12'
-EOF
-    KUBE_GIT_VERSION_FILE="${KUBERNETES_VERSION_FILE}" \
-    SOURCE_DATE_EPOCH="${KUBERNETES_SOURCE_DATE_EPOCH}" \
-    GOPATH="${KUBERNETES_GOPATH}" \
-    GO111MODULE=off \
-    GOTOOLCHAIN=local \
-    bash -c '
-        source hack/lib/init.sh
-        kubernetes_ldflags="$(kube::version::ldflags)"
-        # Kubernetes 1.12 intentionally omits the generated OpenAPI source
-        # from its source archive.  Recreate all required generated files with
-        # the upstream Make target before compiling the server executables.
-        make generated_files
-        test -s pkg/generated/openapi/zz_generated.openapi.go
-        grep -Fq "func GetOpenAPIDefinitions" \
-            pkg/generated/openapi/zz_generated.openapi.go
-        mkdir -p _output/local/bin/linux/amd64
-        for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; do
-            for pass in first second; do
-                CGO_ENABLED=1 go build \
-                    -trimpath \
-                    -ldflags "-buildid= ${kubernetes_ldflags}" \
-                    -o "_output/local/bin/linux/amd64/${binary}.${pass}" \
-                    "./cmd/${binary}"
-            done
-            cmp "_output/local/bin/linux/amd64/${binary}.first" \
-                "_output/local/bin/linux/amd64/${binary}.second"
-            mv "_output/local/bin/linux/amd64/${binary}.first" \
-                "_output/local/bin/linux/amd64/${binary}"
-            rm "_output/local/bin/linux/amd64/${binary}.second"
-        done
-    '
-    for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; do
-        install -m 0755 "_output/local/bin/linux/amd64/${binary}" "${OLDPWD}/${binary}"
-    done
+build_args=(
+    --build-arg "IMAGE_VERSION=${TAG}"
+    --build-arg "SOURCE_REVISION=${SOURCE_REVISION}"
+    --build-arg "KUBERNETES_VERSION=${KUBERNETES_VERSION}"
+    --build-arg "KUBERNETES_GIT_COMMIT=${KUBERNETES_GIT_COMMIT}"
+    --build-arg "KUBERNETES_SOURCE_SHA256=${KUBERNETES_SOURCE_SHA256}"
+    --build-arg "KUBERNETES_LICENSE_SHA256=${KUBERNETES_LICENSE_SHA256}"
+    --build-arg "OPENTELEMETRY_VERSION=${OPENTELEMETRY_VERSION}"
+    --build-arg "OPENTELEMETRY_GRPC_VERSION=${OPENTELEMETRY_GRPC_VERSION}"
+    --build-arg "GRPC_GO_VERSION=${GRPC_GO_VERSION}"
+    --build-arg "CEL_GO_VERSION=${CEL_GO_VERSION}"
+    --build-arg "ETCD_VERSION=${ETCD_VERSION}"
+    --build-arg "ETCD_RAFT_VERSION=${ETCD_RAFT_VERSION}"
+    --build-arg "X_CRYPTO_VERSION=${X_CRYPTO_VERSION}"
+    --build-arg "X_SYS_VERSION=${X_SYS_VERSION}"
+    --build-arg "CNI_VERSION=${CNI_VERSION}"
+    --build-arg "CNI_GIT_COMMIT=${CNI_GIT_COMMIT}"
+    --build-arg "CNI_GIT_TREE=${CNI_GIT_TREE}"
+    --build-arg "CNI_LICENSE_SHA256=${CNI_LICENSE_SHA256}"
 )
+if [ -n "${DOCKER_BUILD_NETWORK:-}" ]; then
+    build_args+=(--network "$DOCKER_BUILD_NETWORK")
+fi
 
+"$CONTAINER_ENGINE" build "${build_args[@]}" -f package/Dockerfile -t "$IMAGE" .
+
+test "$("$CONTAINER_ENGINE" run --rm "$IMAGE" kubeadm version -o short)" = "$KUBERNETES_VERSION"
 for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler; do
-    actual_version=$("./${binary}" --version)
-    if [ "${actual_version}" != "Kubernetes ${KUBERNETES_BINARY_VERSION}" ]; then
-        echo "unexpected ${binary} version: ${actual_version}" >&2
+    test "$("$CONTAINER_ENGINE" run --rm "$IMAGE" "$binary" --version)" = "Kubernetes ${KUBERNETES_VERSION}"
+done
+"$CONTAINER_ENGINE" run --rm "$IMAGE" kubectl version --client=true --output=json | grep -Fq "${KUBERNETES_VERSION#v}"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.kubernetes.version"}}')" = "$KUBERNETES_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.kubernetes.revision"}}')" = "$KUBERNETES_GIT_COMMIT"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.kubernetes.source-sha256"}}')" = "$KUBERNETES_SOURCE_SHA256"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.opentelemetry"}}')" = "$OPENTELEMETRY_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.opentelemetry-grpc"}}')" = "$OPENTELEMETRY_GRPC_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.grpc-go"}}')" = "$GRPC_GO_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.cel-go"}}')" = "$CEL_GO_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.etcd"}}')" = "$ETCD_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.etcd-raft"}}')" = "$ETCD_RAFT_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.x-crypto"}}')" = "$X_CRYPTO_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.dependencies.x-sys"}}')" = "$X_SYS_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.version"}}')" = "$CNI_VERSION"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.revision"}}')" = "$CNI_GIT_COMMIT"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.tree"}}')" = "$CNI_GIT_TREE"
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.tools.compiler"}}')" = 'go1.27.0'
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.runtime.base"}}')" = 'scratch'
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cloud-provider"}}')" = 'external-required'
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.legacy-rancher16-compatible"}}')" = 'false'
+
+command -v trivy >/dev/null 2>&1 || {
+    echo 'trivy is required for the release image scan and SBOM' >&2
+    exit 1
+}
+trivy_args=()
+if [ -n "${TRIVY_CACHE_DIR:-}" ]; then
+    trivy_args+=(--cache-dir "$TRIVY_CACHE_DIR")
+fi
+if [ "${TRIVY_OFFLINE:-false}" = true ]; then
+    trivy_args+=(--skip-db-update --offline-scan)
+fi
+if [ -n "${TRIVY_IMAGE_SOURCE:-}" ]; then
+    trivy_args+=(--image-src "$TRIVY_IMAGE_SOURCE")
+fi
+container_id=$("$CONTAINER_ENGINE" create "$IMAGE")
+trap '"$CONTAINER_ENGINE" rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+"$CONTAINER_ENGINE" export "$container_id" | tar -tf - | sed 's#^\./##' | LC_ALL=C sort -u > dist/rootfs-files.txt
+for required in \
+    etc/ssl/certs/ca-certificates.crt \
+    opt/cni/bin/loopback \
+    usr/bin/kubeadm usr/bin/kubelet usr/bin/kube-proxy usr/bin/kube-apiserver \
+    usr/bin/kube-controller-manager usr/bin/kube-scheduler usr/bin/kubectl; do
+    grep -Fxq "$required" dist/rootfs-files.txt
+done
+for removed in \
+    bin/bash bin/sh usr/bin/az usr/bin/bash usr/bin/docker usr/bin/helm \
+    usr/bin/pebble usr/bin/sh usr/bin/tiller usr/bin/pasturestack-kubernetes-entry; do
+    if grep -Fxq "$removed" dist/rootfs-files.txt; then
+        echo "removed runtime path is still present: ${removed}" >&2
         exit 1
     fi
 done
-kubectl_version=$(./kubectl version --client=true --short=true)
-if ! grep -Fq "${KUBERNETES_BINARY_VERSION}" <<< "${kubectl_version}"; then
-    echo "unexpected kubectl version: ${kubectl_version}" >&2
-    exit 1
-fi
-if grep -a -Fq "${KUBERNETES_BUILD_ROOT}" kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; then
-    echo "KUBERNETES_PACKAGE_NON_REPRODUCIBLE_PATH_PRESENT" >&2
-    exit 1
-fi
-rm -rf "${KUBERNETES_BUILD_ROOT}"
-KUBERNETES_BUILD_ROOT=
+trivy --version > dist/trivy-version.txt
+trivy image "${trivy_args[@]}" --scanners vuln,secret \
+    --exit-code 0 --format json \
+    --output dist/kubernetes-package.trivy-raw.json "$IMAGE"
+trivy image "${trivy_args[@]}" --scanners vuln,secret \
+    --vex security/openvex.json --exit-code 1 --format json \
+    --output dist/kubernetes-package.trivy.json "$IMAGE"
+trivy image "${trivy_args[@]}" --scanners vuln --vex security/openvex.json --format cyclonedx \
+    --output dist/kubernetes-package.cdx.json "$IMAGE"
+cp security/openvex.json dist/openvex.json
+"$CONTAINER_ENGINE" image inspect "$IMAGE" > dist/kubernetes-package.image-inspect.json
+"$CONTAINER_ENGINE" cp "$container_id:/licenses/kubernetes-buildinfo" dist/kubernetes-buildinfo
+"$CONTAINER_ENGINE" cp "$container_id:/licenses/CNI-LOOPBACK-BUILDINFO.txt" dist/CNI-LOOPBACK-BUILDINFO.txt
+"$CONTAINER_ENGINE" rm "$container_id" >/dev/null
+container_id=
+trap - EXIT
+test "$(grep -hF ': go1.27.0' dist/kubernetes-buildinfo/*.txt | wc -l)" -eq 7
+test "$(grep -hc 'openpgp-package-count=0' dist/kubernetes-buildinfo/OPENPGP-REACHABILITY.txt)" -eq 7
+grep -Fq '/out/loopback: go1.27.0' dist/CNI-LOOPBACK-BUILDINFO.txt
+printf '%s\n' "$IMAGE" > dist/images
+printf '%s\n' "$SOURCE_REVISION" > dist/source-revision.txt
+"$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{.Id}}' > dist/image-id.txt
+sha256sum \
+    dist/kubernetes-package.trivy.json \
+    dist/kubernetes-package.trivy-raw.json \
+    dist/kubernetes-package.cdx.json \
+    dist/kubernetes-package.image-inspect.json \
+    dist/openvex.json dist/rootfs-files.txt \
+    dist/trivy-version.txt \
+    dist/kubernetes-buildinfo/*.txt \
+    dist/CNI-LOOPBACK-BUILDINFO.txt \
+    dist/images dist/source-revision.txt dist/image-id.txt \
+    | LC_ALL=C sort -k2 > dist/SHA256SUMS
 
-install -m 0755 /usr/src/cni-loopback loopback
-install -m 0644 /usr/src/CNI-LICENSE CNI-LICENSE
-echo "${CNI_LICENSE_SHA256}  CNI-LICENSE" | sha256sum -c -
-mkdir -p ../dist
-go version -m ./loopback > ../dist/cni-loopback-go-version.txt
-./loopback > ../dist/cni-loopback-version.txt 2>&1
-grep -F "go${CNI_BUILD_GO_VERSION}" ../dist/cni-loopback-go-version.txt
-grep -F "CNI loopback plugin ${CNI_VERSION}" ../dist/cni-loopback-version.txt
-sha256sum loopback > ../dist/cni-loopback.sha256
-
-mkdir -p kubernetes/cluster/addons
-
-cp -r ../addon-templates/kubectl/* kubernetes/cluster/addons/
-cp ../LICENSE ../SECURITY.md ../ORIGIN.md ../COMPATIBILITY.md .
-
-for t in kubernetes/cluster/addons/dns/*.yaml.sed; do
-    sed -f dns.sed <${t} >${t%.sed} && rm ${t}
-    echo ${t%.sed}
-done
-
-if [ -z "${IMAGE}" ]; then
-    if [ -n "${IMAGE_NAME}" ]; then
-        IMAGE="${IMAGE_NAME}:${TAG}"
-    else
-        IMAGE="${REPO}/k8s:${TAG}"
-    fi
-fi
-
-docker build \
-    --build-arg "IMAGE_VERSION=${TAG}" \
-    --build-arg "SOURCE_REVISION=${SOURCE_REVISION}" \
-    -t "${IMAGE}" .
-test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = \
-    "https://github.com/PastureStack/kubernetes-package"
-test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "${TAG}"
-test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${SOURCE_REVISION}"
-echo "${IMAGE}" > ../dist/images
-echo "Built ${IMAGE} from ${SOURCE_REVISION}"
+echo "KUBERNETES_PACKAGE_OK image=${IMAGE} kubernetes=${KUBERNETES_VERSION} cni=${CNI_VERSION} compiler=go1.27.0"

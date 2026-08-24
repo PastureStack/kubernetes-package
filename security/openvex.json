@@ -1,36 +1,22 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/PastureStack/kubernetes-package/security/openvex/v1.12.11",
+  "@id": "https://github.com/PastureStack/kubernetes-package/security/openvex/v1.36.4",
   "author": "PastureStack Security",
-  "timestamp": "2026-08-16T03:36:02Z",
-  "version": 7,
-  "x-pasturestack-expires": "2026-09-15T00:00:00Z",
+  "timestamp": "2026-08-25T00:00:00Z",
+  "version": 1,
   "statements": [
     {
       "vulnerability": {
-        "name": "CVE-2026-69247"
+        "name": "GO-2026-5932"
       },
       "products": [
         {
-          "@id": "pkg:pypi/cryptography@48.0.1"
+          "@id": "pkg:golang/golang.org/x/crypto@v0.55.0"
         }
       ],
       "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The image has no consumer outside the cryptography package that calls pkcs7_decrypt_der, pkcs7_decrypt_pem, or pkcs7_decrypt_smime, and it does not expose an attacker-controlled PKCS#7 EnvelopedData decryption service."
-    },
-    {
-      "vulnerability": {
-        "name": "CVE-2026-69249"
-      },
-      "products": [
-        {
-          "@id": "pkg:pypi/cryptography@48.0.1"
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The CVE CNA record classifies cryptography <49.0.0 as affected, while the current GitHub advisory package range says <=48.0.0; this assessment conservatively treats 48.0.1 as affected. The image has no consumer outside cryptography that references cryptography.x509.verification, PolicyBuilder, build_client_verifier, or build_server_verifier, and the reviewed Azure CLI command paths do not expose attacker-controlled certificate-chain validation. The image build rechecks all installed consumer files and this assessment expires on 2026-09-15."
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "GO-2026-5932 applies only to golang.org/x/crypto/openpgp. The source-build gate enumerates the complete dependency package graph of every shipped Kubernetes command and fails if any openpgp package is present. The retained OPENPGP-REACHABILITY.txt evidence proves a zero package count for all seven commands. Other maintained x/crypto packages remain in use."
     }
   ]
 }

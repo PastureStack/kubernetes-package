@@ -1,25 +1,22 @@
-# Release Review
+# Release Process
 
-This repository has no automatic publishing behavior. The manually dispatched security release gate builds and scans candidate `v1.12.11`, retains its evidence for seven days, and never pushes an image, creates a tag, or deploys a service. Candidate artifacts may be published only after the exact image passes the package gates below. A Catalog release remains blocked until the integration gates also pass.
+The repository never pushes an image, creates a tag, or deploys a cluster automatically.
 
-## Package gates
+A `v1.36.4` release candidate is acceptable only when:
 
-1. Every downloaded Kubernetes, CNI, Docker, Azure CLI, Python wheel, and add-on source or artifact used by the package has a verified upstream source, immutable version, checksum, and license record. Ubuntu packages resolve through snapshot `20260808T000000Z` with every direct package at an exact version.
-2. The exact image has a CycloneDX SBOM and reviewed third-party notice inventory.
-3. Two clean output builds from the same reviewed source, version file, source date, and immutable compiler image produce byte-identical kubelet, kube-proxy, kube-apiserver, kube-controller-manager, kube-scheduler, and kubectl binaries, all reporting the same numeric build version. Two Go 1.26.6 builds from the locked CNI source commit also produce one byte-identical loopback executable.
-4. Static shell validation, image build, binary version and compiler-metadata checks, secret scanning, raw vulnerability reports, and the blocking applicable HIGH/CRITICAL scans pass for both the candidate and its Dapper build environment. Each VEX entry must match the exact package, remain present in the raw scan, and have a release-blocking reachability or package-boundary test.
-5. The kubelet creates, runs, logs, stops, and removes the supplied static Pod on the supported Docker and cgroup environment without restarts; direct loopback CNI `ADD`/`DEL` also succeeds.
-6. CPU, memory, I/O, and writable-layer statistics become meaningful within the bounded observation window and agree with Docker for the same workload. The gate must also reproduce the known failure on the previous release.
-7. No personal registry, workstation path, credential, private endpoint, or staging namespace appears in the image configuration, filesystem, SBOM, documentation, or repository tree.
-8. The operator has created and verified an offline Helm 2 release-data bundle, compared it with the live cluster immediately before the change, and recorded only the non-sensitive checksum and record counts in private release evidence.
-9. The cluster DNS `1.26.9` candidate is rebuilt twice from the checksum-verified source revision and reviewed patch with byte-identical output. Its single non-root image must pass independent HIGH/CRITICAL and secret scans without VEX, Kubernetes 1.12 API discovery, DNS resolution, readiness, metrics, exact bootstrap-role authorization checks, rolling upgrade, rollback, and Service cluster-IP preservation.
-10. The current image contains no Dashboard, Heapster, Grafana, or InfluxDB deployment template and the updater proves that detected historical resources are not deleted or force-replaced.
+1. the worktree is clean and the single annotated numeric tag at `HEAD` is `v1.36.4`;
+2. `bash scripts/validate` passes with no active legacy path;
+3. the official Kubernetes source archive and license match their committed SHA-256 values, while the CNI tag matches the committed Git commit, tree and license SHA-256;
+4. every shipped Kubernetes component reports `v1.36.4` and every Go binary records Go `1.27.0`;
+5. the `scratch` rootfs inventory contains only the intended payload and no shell, package manager, removed tool, or legacy server;
+6. the exact image has zero actionable Trivy vulnerabilities at every severity and zero detected secrets; any VEX entry is backed by a build-time package-reachability proof and the raw result remains published;
+7. the exact image inspect data, raw and VEX-aware Trivy JSON, OpenVEX statement, CycloneDX SBOM, rootfs inventory, source revision, image reference, and `SHA256SUMS` are retained together;
+8. affected deployment paths listed in `COMPATIBILITY.md` pass their environment-specific tests before any registry promotion or cluster change.
 
-## Catalog integration gates
+Run the local release gate with:
 
-1. Control-plane, worker, certificate, metadata, and authentication-bridge services pass in the isolated VM environment.
-2. Required add-ons have verified images, provenance, licenses, and runtime tests.
-3. Installation, host join, restart, upgrade, rollback, and complete deletion pass through the Catalog UI and API.
-4. The Catalog uses a semantic image tag only; immutable digests remain in private release evidence and never appear in the UI value.
+```sh
+bash scripts/release
+```
 
-The historical release procedure remains available in preserved upstream Git history. It is not copied into the current tree because its repositories, image names, and automation are not valid PastureStack release instructions.
+Publishing and deployment remain separate explicitly authorized operations and must use the exact image digest produced from the accepted source revision.

@@ -1,132 +1,181 @@
-FROM docker:29.7.2-cli@sha256:000bb62ff495f986c9f5578eb67cc2cb98b91138eda81d7762d5371eb8a497fe AS snapshot-ca-certificates
+FROM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS kubernetes-builder
 
-FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
+ARG KUBERNETES_VERSION=v1.36.4
+ARG KUBERNETES_GIT_COMMIT=bb826b1d48562f110659e64e8ec444327433db95
+ARG KUBERNETES_SOURCE_SHA256=3c28f11492472df48e658551bf268fd92938b127b0f9dcef7090ac800318c821
+ARG KUBERNETES_LICENSE_SHA256=cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+ARG OPENTELEMETRY_VERSION=v1.45.0
+ARG OPENTELEMETRY_GRPC_VERSION=v0.70.0
+ARG GRPC_GO_VERSION=v1.83.1
+ARG CEL_GO_VERSION=v0.32.0
+ARG ETCD_VERSION=v3.7.1
+ARG ETCD_RAFT_VERSION=v3.7.0
+ARG X_CRYPTO_VERSION=v0.55.0
+ARG X_SYS_VERSION=v0.47.0
+ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
-COPY --from=snapshot-ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY ubuntu-apt.lock /licenses/ubuntu-apt.lock
+RUN set -eux; \
+    test "$(go version)" = "go version go1.27.0 linux/amd64"; \
+    mkdir -p /src/kubernetes /out/buildinfo; \
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        --output /tmp/kubernetes-source.tar.gz "https://dl.k8s.io/${KUBERNETES_VERSION}/kubernetes-src.tar.gz"; \
+    echo "${KUBERNETES_SOURCE_SHA256}  /tmp/kubernetes-source.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/kubernetes-source.tar.gz -C /src/kubernetes; \
+    rm -f /tmp/kubernetes-source.tar.gz; \
+    cd /src/kubernetes; \
+    echo "${KUBERNETES_LICENSE_SHA256}  LICENSE" | sha256sum -c -; \
+    grep -RIlZ --exclude-dir=vendor --exclude='go.sum' 'github.com/google/cel-go' . \
+        | xargs -0 -r sed -i 's#github.com/google/cel-go#cel.dev/cel-go#g'; \
+    find . -path '*/vendor' -prune -o -name go.mod -type f -exec \
+        sed -i -E "s#cel.dev/cel-go v[0-9]+\.[0-9]+\.[0-9]+#cel.dev/cel-go ${CEL_GO_VERSION}#g" {} +; \
+    test -z "$(grep -RIl --exclude-dir=vendor --exclude='go.sum' 'github.com/google/cel-go' .)"; \
+    GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go get \
+        "go.opentelemetry.io/otel@${OPENTELEMETRY_VERSION}" \
+        "go.opentelemetry.io/otel/metric@${OPENTELEMETRY_VERSION}" \
+        "go.opentelemetry.io/otel/sdk@${OPENTELEMETRY_VERSION}" \
+        "go.opentelemetry.io/otel/trace@${OPENTELEMETRY_VERSION}" \
+        "go.opentelemetry.io/otel/exporters/otlp/otlptrace@${OPENTELEMETRY_VERSION}" \
+        "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@${OPENTELEMETRY_VERSION}" \
+        "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc@${OPENTELEMETRY_GRPC_VERSION}" \
+        "google.golang.org/grpc@${GRPC_GO_VERSION}" \
+        "cel.dev/cel-go@${CEL_GO_VERSION}" \
+        "go.etcd.io/etcd/api/v3@${ETCD_VERSION}" \
+        "go.etcd.io/etcd/client/pkg/v3@${ETCD_VERSION}" \
+        "go.etcd.io/etcd/client/v3@${ETCD_VERSION}" \
+        "go.etcd.io/etcd/pkg/v3@${ETCD_VERSION}" \
+        "go.etcd.io/etcd/server/v3@${ETCD_VERSION}" \
+        "go.etcd.io/etcd/etcdutl/v3@${ETCD_VERSION}" \
+        "go.etcd.io/raft/v3@${ETCD_RAFT_VERSION}" \
+        "golang.org/x/crypto@${X_CRYPTO_VERSION}" \
+        "golang.org/x/sys@${X_SYS_VERSION}"; \
+    GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod tidy; \
+    GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod vendor; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' go.opentelemetry.io/otel/sdk)" = "${OPENTELEMETRY_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc)" = "${OPENTELEMETRY_GRPC_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' google.golang.org/grpc)" = "${GRPC_GO_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' cel.dev/cel-go)" = "${CEL_GO_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' go.etcd.io/etcd/client/pkg/v3)" = "${ETCD_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' go.etcd.io/raft/v3)" = "${ETCD_RAFT_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/crypto)" = "${X_CRYPTO_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/sys)" = "${X_SYS_VERSION}"; \
+    : > /out/buildinfo/OPENPGP-REACHABILITY.txt; \
+    for package in cmd/kubeadm cmd/kubelet cmd/kube-proxy cmd/kube-apiserver cmd/kube-controller-manager cmd/kube-scheduler cmd/kubectl; do \
+        if GOWORK=off go list -mod=vendor -deps "./${package}" | grep -Eq '^golang.org/x/crypto/openpgp(/|$)'; then \
+            echo "deprecated OpenPGP package is reachable from ${package}" >&2; \
+            exit 1; \
+        fi; \
+        printf '%s openpgp-package-count=0\n' "${package}" >> /out/buildinfo/OPENPGP-REACHABILITY.txt; \
+    done; \
+    CGO_ENABLED=0 GO_VERSION=1.27.0 FORCE_HOST_GO=1 KUBE_BUILD_PLATFORMS=linux/amd64 \
+        KUBE_GIT_VERSION="${KUBERNETES_VERSION}" KUBE_GIT_COMMIT="${KUBERNETES_GIT_COMMIT}" \
+        KUBE_GIT_TREE_STATE=clean KUBE_GIT_MAJOR=1 KUBE_GIT_MINOR=36 \
+        ./hack/make-rules/build.sh \
+            cmd/kubeadm cmd/kubelet cmd/kube-proxy cmd/kube-apiserver \
+            cmd/kube-controller-manager cmd/kube-scheduler cmd/kubectl; \
+    for binary in kubeadm kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; do \
+        install -m 0555 "_output/local/go/bin/${binary}" "/out/${binary}"; \
+        go version -m "/out/${binary}" > "/out/buildinfo/${binary}.txt"; \
+        grep -Fq "/out/${binary}: go1.27.0" "/out/buildinfo/${binary}.txt"; \
+    done; \
+    test "$(/out/kubeadm version -o short)" = "${KUBERNETES_VERSION}"; \
+    for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler; do \
+        test "$(/out/${binary} --version)" = "Kubernetes ${KUBERNETES_VERSION}"; \
+    done; \
+    /out/kubectl version --client=true --output=json | grep -Fq "\"gitVersion\": \"${KUBERNETES_VERSION}\""; \
+    install -m 0444 LICENSE /out/KUBERNETES-LICENSE; \
+    rm -rf /src/kubernetes /root/.cache/go-build /tmp/go-build*
 
-ARG TARGETARCH=amd64
+FROM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS cni-builder
+
+ARG CNI_VERSION=v1.9.1
+ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
+ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e
+ARG CNI_LICENSE_SHA256=b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1
+ARG X_SYS_VERSION=v0.47.0
+ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
+
+RUN set -eux; \
+    test "$(go version)" = "go version go1.27.0 linux/amd64"; \
+    mkdir -p /out; \
+    git init -q /src/cni; \
+    cd /src/cni; \
+    git remote add origin https://github.com/containernetworking/plugins.git; \
+    git fetch -q --depth=1 --no-tags origin "refs/tags/${CNI_VERSION}"; \
+    git checkout -q --detach FETCH_HEAD; \
+    test "$(git rev-parse HEAD)" = "${CNI_GIT_COMMIT}"; \
+    test "$(git rev-parse 'HEAD^{tree}')" = "${CNI_GIT_TREE}"; \
+    echo "${CNI_LICENSE_SHA256}  LICENSE" | sha256sum -c -; \
+    GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go get "golang.org/x/sys@${X_SYS_VERSION}"; \
+    GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod vendor; \
+    test "$(go list -m -f '{{.Version}}' golang.org/x/sys)" = "${X_SYS_VERSION}"; \
+    CGO_ENABLED=0 GOPROXY=off go test -mod=vendor -run '^$' ./plugins/main/loopback; \
+    CGO_ENABLED=0 GOPROXY=off go build -mod=vendor -trimpath -buildvcs=false \
+        -ldflags "-s -w -buildid= -X github.com/containernetworking/plugins/pkg/utils/buildversion.BuildVersion=${CNI_VERSION}" \
+        -o /out/loopback ./plugins/main/loopback; \
+    /out/loopback 2>&1 | grep -Fq "CNI loopback plugin ${CNI_VERSION}"; \
+    CNI_COMMAND=VERSION /out/loopback | grep -Fq '"supportedVersions"'; \
+    go version -m /out/loopback > /out/CNI-LOOPBACK-BUILDINFO.txt; \
+    grep -Fq '/out/loopback: go1.27.0' /out/CNI-LOOPBACK-BUILDINFO.txt; \
+    install -m 0444 LICENSE /out/CNI-LICENSE; \
+    chmod 0555 /out/loopback; \
+    rm -rf /src/cni /root/.cache/go-build /tmp/go-build*
+
+FROM scratch
+
 ARG IMAGE_VERSION=dev
 ARG SOURCE_REVISION=unknown
-ARG AZURE_CLI_VERSION=2.89.1
-ARG AZURE_CLI_DEB_VERSION=2.89.1-1~noble
-ARG AZURE_CLI_DEB_SHA256=3608abe64c5c1a407d468b790a2187b26d4df7f709f747414d19143d909e45da
-ARG CRYPTOGRAPHY_VERSION=48.0.1
-ARG CRYPTOGRAPHY_WHEEL_SHA256=0ee6ea481db1ab889cba043ec1eda17bb9c1ea79db6722f779c3667f9f70322f
-ARG PYOPENSSL_VERSION=26.2.0
-ARG PYOPENSSL_WHEEL_SHA256=4f9d971bc5298b8bc1fab282803da04bf000c755d4ad9d99b52de2569ca19a70
-ARG DOCKER_VERSION=29.7.2
-ARG DOCKER_LINUX_AMD64_SHA256=803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f
+ARG KUBERNETES_VERSION=v1.36.4
+ARG KUBERNETES_GIT_COMMIT=bb826b1d48562f110659e64e8ec444327433db95
+ARG KUBERNETES_SOURCE_SHA256=3c28f11492472df48e658551bf268fd92938b127b0f9dcef7090ac800318c821
+ARG OPENTELEMETRY_VERSION=v1.45.0
+ARG OPENTELEMETRY_GRPC_VERSION=v0.70.0
+ARG GRPC_GO_VERSION=v1.83.1
+ARG CEL_GO_VERSION=v0.32.0
+ARG ETCD_VERSION=v3.7.1
+ARG ETCD_RAFT_VERSION=v3.7.0
+ARG X_CRYPTO_VERSION=v0.55.0
+ARG X_SYS_VERSION=v0.47.0
 ARG CNI_VERSION=v1.9.1
-ARG CNI_SOURCE_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
-ARG CNI_LICENSE_SHA256=b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1
-ARG CNI_BUILD_GO_VERSION=1.26.6
+ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
+ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e
+
+COPY --from=kubernetes-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=kubernetes-builder \
+    /out/kubeadm /out/kubelet /out/kube-proxy /out/kube-apiserver \
+    /out/kube-controller-manager /out/kube-scheduler /out/kubectl /usr/bin/
+COPY --from=kubernetes-builder /out/buildinfo/ /licenses/kubernetes-buildinfo/
+COPY --from=kubernetes-builder /out/KUBERNETES-LICENSE /licenses/KUBERNETES-LICENSE
+COPY --from=cni-builder /out/loopback /opt/cni/bin/loopback
+COPY --from=cni-builder /out/CNI-LICENSE /out/CNI-LOOPBACK-BUILDINFO.txt /licenses/
+COPY LICENSE SECURITY.md ORIGIN.md COMPATIBILITY.md /licenses/pasturestack/
+
+ENV PATH=/usr/bin:/opt/cni/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    KUBECONFIG=/etc/kubernetes/admin.conf
 
 LABEL org.opencontainers.image.source="https://github.com/PastureStack/kubernetes-package" \
       org.opencontainers.image.title="pasturestack-kubernetes-package" \
-      org.opencontainers.image.description="PastureStack Kubernetes compatibility package proof-of-concept image" \
+      org.opencontainers.image.description="Current upstream Kubernetes component and CNI bundle" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      io.pasturestack.azure-cli.version="${AZURE_CLI_VERSION}" \
-      io.pasturestack.cryptography.version="${CRYPTOGRAPHY_VERSION}" \
-      io.pasturestack.pyopenssl.version="${PYOPENSSL_VERSION}" \
+      io.pasturestack.kubernetes.version="${KUBERNETES_VERSION}" \
+      io.pasturestack.kubernetes.revision="${KUBERNETES_GIT_COMMIT}" \
+      io.pasturestack.kubernetes.source-sha256="${KUBERNETES_SOURCE_SHA256}" \
+      io.pasturestack.dependencies.opentelemetry="${OPENTELEMETRY_VERSION}" \
+      io.pasturestack.dependencies.opentelemetry-grpc="${OPENTELEMETRY_GRPC_VERSION}" \
+      io.pasturestack.dependencies.grpc-go="${GRPC_GO_VERSION}" \
+      io.pasturestack.dependencies.cel-go="${CEL_GO_VERSION}" \
+      io.pasturestack.dependencies.etcd="${ETCD_VERSION}" \
+      io.pasturestack.dependencies.etcd-raft="${ETCD_RAFT_VERSION}" \
+      io.pasturestack.dependencies.x-crypto="${X_CRYPTO_VERSION}" \
+      io.pasturestack.dependencies.x-sys="${X_SYS_VERSION}" \
       io.pasturestack.cni.version="${CNI_VERSION}" \
-      io.pasturestack.cni.revision="${CNI_SOURCE_COMMIT}" \
-      io.pasturestack.cni.go.version="${CNI_BUILD_GO_VERSION}" \
-      io.pasturestack.migration="true"
+      io.pasturestack.cni.revision="${CNI_GIT_COMMIT}" \
+      io.pasturestack.cni.tree="${CNI_GIT_TREE}" \
+      io.pasturestack.tools.compiler="go1.27.0" \
+      io.pasturestack.runtime.base="scratch" \
+      io.pasturestack.cloud-provider="external-required" \
+      io.pasturestack.legacy-rancher16-compatible="false"
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    CNI=${CNI_VERSION} \
-    PASTURESTACK_LOCALE=en-US
-
-# The CA donor, Ubuntu snapshot, exact direct-package versions, Azure CLI .deb,
-# and Python wheels are independently locked. No mutable vendor APT repository
-# or unconstrained pip resolver participates in this build.
-RUN set -eux; \
-    . /licenses/ubuntu-apt.lock; \
-    find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
-        -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
-        -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' {} +; \
-    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\nAcquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\nAcquire::AllowInsecureRepositories "false";\nAPT::Get::AllowUnauthenticated "false";\n' > /etc/apt/apt.conf.d/80pasturestack-retries; \
-    apt-get --snapshot "${UBUNTU_APT_SNAPSHOT}" update; \
-    apt-get --snapshot "${UBUNTU_APT_SNAPSHOT}" install -y --no-install-recommends \
-        bash="${UBUNTU_APT_BASH_VERSION}" \
-        ca-certificates="${UBUNTU_APT_CA_CERTIFICATES_VERSION}" \
-        ceph-common="${UBUNTU_APT_CEPH_COMMON_VERSION}" \
-        cifs-utils="${UBUNTU_APT_CIFS_UTILS_VERSION}" \
-        conntrack="${UBUNTU_APT_CONNTRACK_VERSION}" \
-        curl="${UBUNTU_APT_CURL_VERSION}" \
-        ethtool="${UBUNTU_APT_ETHTOOL_VERSION}" \
-        file="${UBUNTU_APT_FILE_VERSION}" \
-        git="${UBUNTU_APT_GIT_VERSION}" \
-        glusterfs-client="${UBUNTU_APT_GLUSTERFS_CLIENT_VERSION}" \
-        ipset="${UBUNTU_APT_IPSET_VERSION}" \
-        iptables="${UBUNTU_APT_IPTABLES_VERSION}" \
-        jq="${UBUNTU_APT_JQ_VERSION}" \
-        netcat-openbsd="${UBUNTU_APT_NETCAT_OPENBSD_VERSION}" \
-        nfs-common="${UBUNTU_APT_NFS_COMMON_VERSION}" \
-        open-iscsi="${UBUNTU_APT_OPEN_ISCSI_VERSION}" \
-        socat="${UBUNTU_APT_SOCAT_VERSION}" \
-        unzip="${UBUNTU_APT_UNZIP_VERSION}" \
-        util-linux="${UBUNTU_APT_UTIL_LINUX_VERSION}" \
-        wget="${UBUNTU_APT_WGET_VERSION}" \
-        xfsprogs="${UBUNTU_APT_XFSPROGS_VERSION}"; \
-    test "${TARGETARCH}" = "amd64"; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 600 \
-        -o /tmp/azure-cli.deb "https://packages.microsoft.com/repos/azure-cli/pool/main/a/azure-cli/azure-cli_${AZURE_CLI_DEB_VERSION}_amd64.deb"; \
-    echo "${AZURE_CLI_DEB_SHA256}  /tmp/azure-cli.deb" | sha256sum -c -; \
-    apt-get --snapshot "${UBUNTU_APT_SNAPSHOT}" install -y --no-install-recommends /tmp/azure-cli.deb; \
-    test "$(dpkg-query -W -f='${Version}' azure-cli)" = "${AZURE_CLI_DEB_VERSION}"; \
-    cryptography_wheel="/tmp/cryptography-${CRYPTOGRAPHY_VERSION}-cp311-abi3-manylinux_2_34_x86_64.whl"; \
-    pyopenssl_wheel="/tmp/pyopenssl-${PYOPENSSL_VERSION}-py3-none-any.whl"; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 300 \
-        -o "${cryptography_wheel}" "https://files.pythonhosted.org/packages/9f/13/8b765e2e12b07c74941caadb9d1c8fdc006c4dfbf2b8f2d610519758954d/cryptography-${CRYPTOGRAPHY_VERSION}-cp311-abi3-manylinux_2_34_x86_64.whl"; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 300 \
-        -o "${pyopenssl_wheel}" "https://files.pythonhosted.org/packages/73/b8/a0e2790ae249d6f38c9f66de7a211621a7ab2650217bcd04e1262f578a56/pyopenssl-${PYOPENSSL_VERSION}-py3-none-any.whl"; \
-    echo "${CRYPTOGRAPHY_WHEEL_SHA256}  ${cryptography_wheel}" | sha256sum -c -; \
-    echo "${PYOPENSSL_WHEEL_SHA256}  ${pyopenssl_wheel}" | sha256sum -c -; \
-    /opt/az/bin/python3 -m pip install --no-cache-dir --no-index --no-deps --upgrade \
-        "${cryptography_wheel}" \
-        "${pyopenssl_wheel}"; \
-    /opt/az/bin/python3 -c 'import cryptography, OpenSSL; assert cryptography.__version__ == "48.0.1"; assert OpenSSL.__version__ == "26.2.0"'; \
-    /opt/az/bin/python3 -m pip check; \
-    az version; \
-    { \
-        printf 'snapshot\t%s\n' "${UBUNTU_APT_SNAPSHOT}"; \
-        dpkg-query -W -f='${binary:Package}\t${Version}\n' | LC_ALL=C sort; \
-    } > /licenses/KUBERNETES-PACKAGE-UBUNTU-APT-PACKAGES.tsv; \
-    apt-get clean; \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/bin/pebble
-
-COPY verify-azure-python-security /usr/local/bin/verify-azure-python-security
-RUN /usr/local/bin/verify-azure-python-security
-
-RUN set -eux; \
-    case "${TARGETARCH}" in \
-        amd64) docker_arch=x86_64; docker_sha="${DOCKER_LINUX_AMD64_SHA256}" ;; \
-        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 300 \
-        -o /tmp/docker.tgz "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
-    echo "${docker_sha}  /tmp/docker.tgz" | sha256sum -c -; \
-    tar xzf /tmp/docker.tgz -C /tmp docker/docker; \
-    install -m 0755 /tmp/docker/docker /usr/bin/docker; \
-    mkdir -p /mnt/sda1; \
-    ln -sfn /var /mnt/sda1/var; \
-    docker --version; \
-    rm -rf /tmp/*
-
-# The Dapper stage rebuilds this single CNI plug-in twice from the locked
-# source commit with the reviewed Go toolchain before it enters this image.
-COPY CNI-LICENSE /licenses/CNI-LICENSE
-COPY loopback /opt/loopback/bin/loopback
-RUN set -eux; \
-    echo "${CNI_LICENSE_SHA256}  /licenses/CNI-LICENSE" | sha256sum -c -; \
-    test -x /opt/loopback/bin/loopback
-
-COPY update-platform-ca runc-1.10 utils.sh entry.sh addons-update.sh kubectl kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler /usr/bin/
-COPY kubernetes/cluster/addons /etc/kubernetes/addons/
-COPY LICENSE SECURITY.md ORIGIN.md COMPATIBILITY.md /licenses/
-
-ENTRYPOINT ["/usr/bin/entry.sh"]
+CMD ["/usr/bin/kubectl", "version", "--client=true", "--output=json"]
