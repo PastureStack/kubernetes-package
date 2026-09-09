@@ -18,7 +18,7 @@ PastureStack claims only its later modifications and does not imply affiliation 
 - Commit: `bb826b1d48562f110659e64e8ec444327433db95`
 - Source archive SHA-256: `3c28f11492472df48e658551bf268fd92938b127b0f9dcef7090ac800318c821`
 - License SHA-256: `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`
-- Build-time dependency overrides: OpenTelemetry `v1.45.0`, OpenTelemetry gRPC instrumentation `v0.70.0`, gRPC-Go `v1.83.1`, `cel.dev/cel-go` `v0.32.0`, etcd `v3.7.1`, `go.etcd.io/raft/v3` `v3.7.0`, `x/crypto` `v0.55.0`, and `x/sys` `v0.47.0`
+- Build-time dependency overrides: OpenTelemetry `v1.45.0`, OpenTelemetry gRPC instrumentation `v0.70.0`, gRPC-Go `v1.83.2`, `cel.dev/cel-go` `v0.32.0`, etcd `v3.7.1`, `go.etcd.io/raft/v3` `v3.7.0`, `x/crypto` `v0.56.0`, and `x/sys` `v0.47.0`
 
 ### CNI plug-ins
 
