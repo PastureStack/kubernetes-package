@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated pure numeric release tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,6 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       TARGET_REPOSITORY: ghcr.io/pasturestack/kubernetes-package
       TRIVY_VERSION: 0.74.0
       TRIVY_ARCHIVE_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
@@ -27,6 +34,7 @@ jobs:
       - name: Check out immutable tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -34,10 +42,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REF_TYPE" = tag
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
-          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          release_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          test "$(git rev-parse HEAD)" = "$release_commit"
+          if test "$GITHUB_EVENT_NAME" = push; then
+            test "$GITHUB_REF_TYPE" = tag
+            test "$release_commit" = "$GITHUB_SHA"
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$release_commit" refs/remotes/origin/main
           test -z "$(git status --porcelain)"
 
       - name: Install checksum-pinned Trivy
@@ -58,11 +72,11 @@ jobs:
         run: |
           set -euo pipefail
           scripts/release
-          test "$(cat dist/images)" = "pasturestack/kubernetes-package:$GITHUB_REF_NAME"
+          test "$(cat dist/images)" = "pasturestack/kubernetes-package:$RELEASE_TAG"
           test -s dist/kubernetes-package.cdx.json
           test -s dist/kubernetes-package.trivy.json
           test -s dist/kubernetes-package.trivy-raw.json
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           tar --sort=name --owner=0 --group=0 --numeric-owner \
             -C dist -cJf "dist/kubernetes-package-${version}-evidence.tar.xz" \
             CNI-LOOPBACK-BUILDINFO.txt image-id.txt images \
@@ -78,12 +92,12 @@ jobs:
         id: publish
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PUBLISH_TOKEN || github.token }}
         run: |
           set -euo pipefail
-          source_image="pasturestack/kubernetes-package:$GITHUB_REF_NAME"
-          target_image="$TARGET_REPOSITORY:$GITHUB_REF_NAME"
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          source_image="pasturestack/kubernetes-package:$RELEASE_TAG"
+          target_image="$TARGET_REPOSITORY:$RELEASE_TAG"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker tag "$source_image" "$target_image"
           docker push "$target_image"
           reference="$(docker image inspect --format '{{index .RepoDigests 0}}' "$target_image")"
@@ -109,9 +123,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "Kubernetes Package $GITHUB_REF_NAME" \
+          version="${RELEASE_TAG#v}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Kubernetes Package $RELEASE_TAG" \
             --notes 'Source-built Kubernetes component bundle published under its pure numeric upstream version, with smoke tests, vulnerability evidence, SBOM, checksums, and provenance.' \
             "dist/kubernetes-package-${version}-evidence.tar.xz" \
             dist/kubernetes-package.cdx.json \
@@ -126,7 +144,7 @@ jobs:
           set +e
           docker logout ghcr.io >/dev/null 2>&1
           docker image rm -f \
-            "pasturestack/kubernetes-package:$GITHUB_REF_NAME" \
-            "$TARGET_REPOSITORY:$GITHUB_REF_NAME" >/dev/null 2>&1
+            "pasturestack/kubernetes-package:$RELEASE_TAG" \
+            "$TARGET_REPOSITORY:$RELEASE_TAG" >/dev/null 2>&1
           docker builder prune --all --force >/dev/null 2>&1
           rm -rf -- dist
