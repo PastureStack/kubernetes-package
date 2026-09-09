@@ -16,7 +16,7 @@ upgrade path for a legacy Rancher 1.6 cluster.
 - Kubernetes `v1.36.4`, exact upstream commit `bb826b1d48562f110659e64e8ec444327433db95`.
 - `kubeadm`, `kubelet`, `kube-proxy`, `kube-apiserver`, `kube-controller-manager`, `kube-scheduler`, and `kubectl` built from that source with Go `1.27.0`.
 - CNI plug-ins `v1.9.1` loopback binary built from the vendored upstream source with Go `1.27.0`.
-- Current dependency overrides: OpenTelemetry `v1.45.0`, OpenTelemetry gRPC instrumentation `v0.70.0`, gRPC-Go `v1.83.1`, `cel.dev/cel-go` `v0.32.0`, etcd `v3.7.1`, `go.etcd.io/raft/v3` `v3.7.0`, `x/crypto` `v0.55.0`, and `x/sys` `v0.47.0`.
+- Current dependency overrides: OpenTelemetry `v1.45.0`, OpenTelemetry gRPC instrumentation `v0.70.0`, gRPC-Go `v1.83.2`, `cel.dev/cel-go` `v0.32.0`, etcd `v3.7.1`, `go.etcd.io/raft/v3` `v3.7.0`, `x/crypto` `v0.56.0`, and `x/sys` `v0.47.0`.
 - Statically linked component binaries in a `scratch` runtime with only the required CA bundle, licenses, and build evidence.
 
 The image deliberately contains no Docker CLI, Azure CLI, Helm, Tiller, embedded cloud provider, legacy DNS add-on, dashboard, monitoring add-on, or Rancher metadata bootstrap logic.
