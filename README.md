@@ -4,12 +4,12 @@ This repository builds a compact, auditable bundle of current upstream Kubernete
 
 PastureStack is an independent community project and is not affiliated with or endorsed by Rancher Labs or SUSE. The preserved upstream history and Apache-2.0 attribution remain intact.
 
-The previous public Release, `v1.12.10-pasturestack.4`, is immutable historical
-evidence for the retired compatibility package. The maintained component
-bundle uses pure numeric coordinate `v1.36.4`; product identity and provenance
-are carried by the package name, labels, SBOM, and attestations rather than a
-text qualifier in the tag. This component image is still not an in-place
-upgrade path for a legacy Rancher 1.6 cluster.
+The retired compatibility package remains available only as immutable
+historical evidence. The maintained component bundle uses the pure numeric
+coordinate `v1.36.4`; product identity and provenance are carried by the
+package name, labels, SBOM, and attestations rather than a text qualifier in
+the tag. This component image is still not an in-place upgrade path for a
+legacy Rancher 1.6 cluster.
 
 ## Current payload
 
