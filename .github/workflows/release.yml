@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: kubernetes-package-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      TARGET_REPOSITORY: ghcr.io/pasturestack/kubernetes-package
+      TRIVY_VERSION: 0.74.0
+      TRIVY_ARCHIVE_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+    steps:
+      - name: Check out immutable tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Install checksum-pinned Trivy
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$archive" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          printf '%s  %s\n' "$TRIVY_ARCHIVE_SHA256" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+          sudo install -m 0555 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
+          trivy image --download-db-only
+
+      - name: Build, smoke-test, scan, and inventory exact tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/release
+          test "$(cat dist/images)" = "pasturestack/kubernetes-package:$GITHUB_REF_NAME"
+          test -s dist/kubernetes-package.cdx.json
+          test -s dist/kubernetes-package.trivy.json
+          test -s dist/kubernetes-package.trivy-raw.json
+          version="${GITHUB_REF_NAME#v}"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            -C dist -cJf "dist/kubernetes-package-${version}-evidence.tar.xz" \
+            CNI-LOOPBACK-BUILDINFO.txt image-id.txt images \
+            kubernetes-buildinfo kubernetes-package.cdx.json \
+            kubernetes-package.image-inspect.json kubernetes-package.trivy-raw.json \
+            kubernetes-package.trivy.json openvex.json rootfs-files.txt \
+            source-revision.txt trivy-version.txt
+          sha256sum "dist/kubernetes-package-${version}-evidence.tar.xz" \
+            dist/kubernetes-package.cdx.json dist/kubernetes-package.trivy.json \
+            dist/openvex.json | LC_ALL=C sort -k2 > dist/RELEASE-SHA256SUMS
+
+      - name: Publish immutable runtime image
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source_image="pasturestack/kubernetes-package:$GITHUB_REF_NAME"
+          target_image="$TARGET_REPOSITORY:$GITHUB_REF_NAME"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "$source_image" "$target_image"
+          docker push "$target_image"
+          reference="$(docker image inspect --format '{{index .RepoDigests 0}}' "$target_image")"
+          digest="${reference#*@}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release evidence
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/RELEASE-SHA256SUMS
+
+      - name: Attest runtime image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.TARGET_REPOSITORY }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Kubernetes Package $GITHUB_REF_NAME" \
+            --notes 'Source-built Kubernetes component bundle published under its pure numeric upstream version, with smoke tests, vulnerability evidence, SBOM, checksums, and provenance.' \
+            "dist/kubernetes-package-${version}-evidence.tar.xz" \
+            dist/kubernetes-package.cdx.json \
+            dist/kubernetes-package.trivy.json \
+            dist/openvex.json \
+            dist/RELEASE-SHA256SUMS
+
+      - name: Clean run-owned resources
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker logout ghcr.io >/dev/null 2>&1
+          docker image rm -f \
+            "pasturestack/kubernetes-package:$GITHUB_REF_NAME" \
+            "$TARGET_REPOSITORY:$GITHUB_REF_NAME" >/dev/null 2>&1
+          docker builder prune --all --force >/dev/null 2>&1
+          rm -rf -- dist
