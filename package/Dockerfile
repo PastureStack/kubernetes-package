@@ -1,4 +1,4 @@
-FROM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS kubernetes-builder
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS kubernetes-builder
 
 ARG KUBERNETES_VERSION=v1.36.4
 ARG KUBERNETES_GIT_COMMIT=bb826b1d48562f110659e64e8ec444327433db95
@@ -15,7 +15,7 @@ ARG X_SYS_VERSION=v0.47.0
 ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
 RUN set -eux; \
-    test "$(go version)" = "go version go1.27.0 linux/amd64"; \
+    test "$(go version)" = "go version go1.27.3 linux/amd64"; \
     mkdir -p /src/kubernetes /out/buildinfo; \
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
         --output /tmp/kubernetes-source.tar.gz "https://dl.k8s.io/${KUBERNETES_VERSION}/kubernetes-src.tar.gz"; \
@@ -66,7 +66,7 @@ RUN set -eux; \
         fi; \
         printf '%s openpgp-package-count=0\n' "${package}" >> /out/buildinfo/OPENPGP-REACHABILITY.txt; \
     done; \
-    CGO_ENABLED=0 GO_VERSION=1.27.0 FORCE_HOST_GO=1 KUBE_BUILD_PLATFORMS=linux/amd64 \
+    CGO_ENABLED=0 GO_VERSION=1.27.3 FORCE_HOST_GO=1 KUBE_BUILD_PLATFORMS=linux/amd64 \
         KUBE_GIT_VERSION="${KUBERNETES_VERSION}" KUBE_GIT_COMMIT="${KUBERNETES_GIT_COMMIT}" \
         KUBE_GIT_TREE_STATE=clean KUBE_GIT_MAJOR=1 KUBE_GIT_MINOR=36 \
         ./hack/make-rules/build.sh \
@@ -75,7 +75,7 @@ RUN set -eux; \
     for binary in kubeadm kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; do \
         install -m 0555 "_output/local/go/bin/${binary}" "/out/${binary}"; \
         go version -m "/out/${binary}" > "/out/buildinfo/${binary}.txt"; \
-        grep -Fq "/out/${binary}: go1.27.0" "/out/buildinfo/${binary}.txt"; \
+        grep -Fq "/out/${binary}: go1.27.3" "/out/buildinfo/${binary}.txt"; \
     done; \
     test "$(/out/kubeadm version -o short)" = "${KUBERNETES_VERSION}"; \
     for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler; do \
@@ -85,7 +85,7 @@ RUN set -eux; \
     install -m 0444 LICENSE /out/KUBERNETES-LICENSE; \
     rm -rf /src/kubernetes /root/.cache/go-build /tmp/go-build*
 
-FROM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS cni-builder
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS cni-builder
 
 ARG CNI_VERSION=v1.9.1
 ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
@@ -95,7 +95,7 @@ ARG X_SYS_VERSION=v0.47.0
 ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
 RUN set -eux; \
-    test "$(go version)" = "go version go1.27.0 linux/amd64"; \
+    test "$(go version)" = "go version go1.27.3 linux/amd64"; \
     mkdir -p /out; \
     git init -q /src/cni; \
     cd /src/cni; \
@@ -115,7 +115,7 @@ RUN set -eux; \
     /out/loopback 2>&1 | grep -Fq "CNI loopback plugin ${CNI_VERSION}"; \
     CNI_COMMAND=VERSION /out/loopback | grep -Fq '"supportedVersions"'; \
     go version -m /out/loopback > /out/CNI-LOOPBACK-BUILDINFO.txt; \
-    grep -Fq '/out/loopback: go1.27.0' /out/CNI-LOOPBACK-BUILDINFO.txt; \
+    grep -Fq '/out/loopback: go1.27.3' /out/CNI-LOOPBACK-BUILDINFO.txt; \
     install -m 0444 LICENSE /out/CNI-LICENSE; \
     chmod 0555 /out/loopback; \
     rm -rf /src/cni /root/.cache/go-build /tmp/go-build*
@@ -173,7 +173,7 @@ LABEL org.opencontainers.image.source="https://github.com/PastureStack/kubernete
       io.pasturestack.cni.version="${CNI_VERSION}" \
       io.pasturestack.cni.revision="${CNI_GIT_COMMIT}" \
       io.pasturestack.cni.tree="${CNI_GIT_TREE}" \
-      io.pasturestack.tools.compiler="go1.27.0" \
+      io.pasturestack.tools.compiler="go1.27.3" \
       io.pasturestack.runtime.base="scratch" \
       io.pasturestack.cloud-provider="external-required" \
       io.pasturestack.legacy-rancher16-compatible="false"

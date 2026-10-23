@@ -108,7 +108,7 @@ test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Lab
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.version"}}')" = "$CNI_VERSION"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.revision"}}')" = "$CNI_GIT_COMMIT"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.tree"}}')" = "$CNI_GIT_TREE"
-test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.tools.compiler"}}')" = 'go1.27.0'
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.tools.compiler"}}')" = 'go1.27.3'
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.runtime.base"}}')" = 'scratch'
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cloud-provider"}}')" = 'external-required'
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.legacy-rancher16-compatible"}}')" = 'false'
@@ -161,9 +161,9 @@ cp security/openvex.json dist/openvex.json
 "$CONTAINER_ENGINE" rm "$container_id" >/dev/null
 container_id=
 trap - EXIT
-test "$(grep -hF ': go1.27.0' dist/kubernetes-buildinfo/*.txt | wc -l)" -eq 7
+test "$(grep -hF ': go1.27.3' dist/kubernetes-buildinfo/*.txt | wc -l)" -eq 7
 test "$(grep -hc 'openpgp-package-count=0' dist/kubernetes-buildinfo/OPENPGP-REACHABILITY.txt)" -eq 7
-grep -Fq '/out/loopback: go1.27.0' dist/CNI-LOOPBACK-BUILDINFO.txt
+grep -Fq '/out/loopback: go1.27.3' dist/CNI-LOOPBACK-BUILDINFO.txt
 printf '%s\n' "$IMAGE" > dist/images
 printf '%s\n' "$SOURCE_REVISION" > dist/source-revision.txt
 "$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{.Id}}' > dist/image-id.txt
@@ -179,4 +179,4 @@ sha256sum \
     dist/images dist/source-revision.txt dist/image-id.txt \
     | LC_ALL=C sort -k2 > dist/SHA256SUMS
 
-echo "KUBERNETES_PACKAGE_OK image=${IMAGE} kubernetes=${KUBERNETES_VERSION} cni=${CNI_VERSION} compiler=go1.27.0"
+echo "KUBERNETES_PACKAGE_OK image=${IMAGE} kubernetes=${KUBERNETES_VERSION} cni=${CNI_VERSION} compiler=go1.27.3"

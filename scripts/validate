@@ -9,7 +9,7 @@ for script in scripts/package scripts/ci scripts/release; do
 done
 
 test "$(grep -c '^FROM ' package/Dockerfile)" -eq 3
-test "$(grep -c 'golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466' package/Dockerfile)" -eq 2
+test "$(grep -c 'golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5' package/Dockerfile)" -eq 2
 grep -Fxq 'FROM scratch' package/Dockerfile
 grep -Fq 'ARG KUBERNETES_VERSION=v1.36.4' package/Dockerfile
 grep -Fq 'ARG KUBERNETES_GIT_COMMIT=bb826b1d48562f110659e64e8ec444327433db95' package/Dockerfile
@@ -69,4 +69,4 @@ done
 
 test "$(find . -type f -not -path './.git/*' -not -path './dist/*' | wc -l)" -le 20
 git diff --check
-echo 'KUBERNETES_PACKAGE_VALIDATE_OK kubernetes=v1.36.4 cni=v1.9.1 compiler=go1.27.0 runtime=scratch legacy=removed'
+echo 'KUBERNETES_PACKAGE_VALIDATE_OK kubernetes=v1.36.4 cni=v1.9.1 compiler=go1.27.3 runtime=scratch legacy=removed'
