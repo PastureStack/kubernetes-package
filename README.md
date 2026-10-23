@@ -57,6 +57,8 @@ SOURCE_REVISION=$(git rev-parse HEAD) TAG=v1.36.4 bash scripts/package
 
 ## October 2026 security maintenance
 
+The Kubernetes source build selects `golang.org/x/net v0.60.0` and its required `golang.org/x/sys v0.48.0`. This is a wrapper security rebuild; the upstream Kubernetes version remains `v1.36.4`.
+
 The wrapper release is `v1.36.5`; its Kubernetes source and binary version remain `v1.36.4`. This is a security rebuild of the wrapper, not an upstream Kubernetes version upgrade.
 
 Maintained Go builds select the patched Go 1.27.3 compiler without raising the existing Go language requirement. Release artifacts must pass the repository's existing checks before publication.

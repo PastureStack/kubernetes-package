@@ -11,7 +11,8 @@ ARG CEL_GO_VERSION=v0.32.0
 ARG ETCD_VERSION=v3.7.1
 ARG ETCD_RAFT_VERSION=v3.7.0
 ARG X_CRYPTO_VERSION=v0.56.0
-ARG X_SYS_VERSION=v0.47.0
+ARG X_NET_VERSION=v0.60.0
+ARG X_SYS_VERSION=v0.48.0
 ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
 RUN set -eux; \
@@ -47,6 +48,7 @@ RUN set -eux; \
         "go.etcd.io/etcd/etcdutl/v3@${ETCD_VERSION}" \
         "go.etcd.io/raft/v3@${ETCD_RAFT_VERSION}" \
         "golang.org/x/crypto@${X_CRYPTO_VERSION}" \
+        "golang.org/x/net@${X_NET_VERSION}" \
         "golang.org/x/sys@${X_SYS_VERSION}"; \
     GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod tidy; \
     GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod vendor; \
@@ -57,6 +59,7 @@ RUN set -eux; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' go.etcd.io/etcd/client/pkg/v3)" = "${ETCD_VERSION}"; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' go.etcd.io/raft/v3)" = "${ETCD_RAFT_VERSION}"; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/crypto)" = "${X_CRYPTO_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/net)" = "${X_NET_VERSION}"; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/sys)" = "${X_SYS_VERSION}"; \
     : > /out/buildinfo/OPENPGP-REACHABILITY.txt; \
     for package in cmd/kubeadm cmd/kubelet cmd/kube-proxy cmd/kube-apiserver cmd/kube-controller-manager cmd/kube-scheduler cmd/kubectl; do \
@@ -91,7 +94,7 @@ ARG CNI_VERSION=v1.9.1
 ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
 ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e
 ARG CNI_LICENSE_SHA256=b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1
-ARG X_SYS_VERSION=v0.47.0
+ARG X_SYS_VERSION=v0.48.0
 ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
 RUN set -eux; \
@@ -134,7 +137,8 @@ ARG CEL_GO_VERSION=v0.32.0
 ARG ETCD_VERSION=v3.7.1
 ARG ETCD_RAFT_VERSION=v3.7.0
 ARG X_CRYPTO_VERSION=v0.56.0
-ARG X_SYS_VERSION=v0.47.0
+ARG X_NET_VERSION=v0.60.0
+ARG X_SYS_VERSION=v0.48.0
 ARG CNI_VERSION=v1.9.1
 ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
 ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e
@@ -169,6 +173,7 @@ LABEL org.opencontainers.image.source="https://github.com/PastureStack/kubernete
       io.pasturestack.dependencies.etcd="${ETCD_VERSION}" \
       io.pasturestack.dependencies.etcd-raft="${ETCD_RAFT_VERSION}" \
       io.pasturestack.dependencies.x-crypto="${X_CRYPTO_VERSION}" \
+      io.pasturestack.dependencies.x-net="${X_NET_VERSION}" \
       io.pasturestack.dependencies.x-sys="${X_SYS_VERSION}" \
       io.pasturestack.cni.version="${CNI_VERSION}" \
       io.pasturestack.cni.revision="${CNI_GIT_COMMIT}" \
