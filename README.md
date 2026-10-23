@@ -50,7 +50,7 @@ Legacy command-line flags, metadata endpoints, Docker-shim assumptions, in-tree 
 
 ```sh
 bash scripts/validate
-SOURCE_REVISION=$(git rev-parse HEAD) TAG=v1.36.4 bash scripts/package
+SOURCE_REVISION=$(git rev-parse HEAD) TAG=v1.36.5 bash scripts/package
 ```
 
 `scripts/package` builds the exact image, checks every packaged binary and label, compiles the CNI loopback test suite and exercises its unprivileged `VERSION` protocol, confirms the minimal root filesystem, scans every vulnerability severity and secrets, and emits raw plus VEX-aware Trivy JSON, a vulnerability-enriched CycloneDX SBOM, the rootfs inventory, and immutable evidence under `dist/`. The sole VEX statement is accepted only after the source package graph proves that all seven commands exclude the discontinued `x/crypto/openpgp` package. CNI `ADD`/`CHECK`/`DEL` tests require a privileged network namespace and belong to the target-node integration scope in `COMPATIBILITY.md`, not to a rootless image build.
