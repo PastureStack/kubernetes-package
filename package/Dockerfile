@@ -15,6 +15,17 @@ ARG X_NET_VERSION=v0.60.0
 ARG X_SYS_VERSION=v0.48.0
 ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
+ADD --checksum=sha256:5b6326f1932cfd7be57130561dc78192f09ed9f58bfbe6606ed0c50510c3b6cd https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260816ubuntu0.26.04.1_all.deb /tmp/pasturestack-ca-certificates.deb
+RUN set -eux; \
+    mkdir -p /out /tmp/pasturestack-trust; \
+    test "$(dpkg-deb -f /tmp/pasturestack-ca-certificates.deb Version)" = 20260816ubuntu0.26.04.1; \
+    dpkg-deb -x /tmp/pasturestack-ca-certificates.deb /tmp/pasturestack-trust; \
+    test ! -e /tmp/pasturestack-trust/usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt; \
+    find /tmp/pasturestack-trust/usr/share/ca-certificates -type f -name '*.crt' | LC_ALL=C sort | \
+        while IFS= read -r certificate; do sed -e '$a\' "$certificate"; done > /out/ca-certificates.crt; \
+    test -s /out/ca-certificates.crt; \
+    rm -rf /tmp/pasturestack-trust /tmp/pasturestack-ca-certificates.deb
+
 RUN set -eux; \
     test "$(go version)" = "go version go1.27.3 linux/amd64"; \
     mkdir -p /src/kubernetes /out/buildinfo; \
@@ -143,7 +154,7 @@ ARG CNI_VERSION=v1.9.1
 ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
 ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e
 
-COPY --from=kubernetes-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=kubernetes-builder /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=kubernetes-builder \
     /out/kubeadm /out/kubelet /out/kube-proxy /out/kube-apiserver \
     /out/kube-controller-manager /out/kube-scheduler /out/kubectl /usr/bin/
