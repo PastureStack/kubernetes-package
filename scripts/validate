@@ -9,7 +9,7 @@ for script in scripts/package scripts/ci scripts/release; do
 done
 
 test "$(grep -c '^FROM ' package/Dockerfile)" -eq 3
-test "$(grep -c 'golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466' package/Dockerfile)" -eq 2
+test "$(grep -c 'golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5' package/Dockerfile)" -eq 2
 grep -Fxq 'FROM scratch' package/Dockerfile
 grep -Fq 'ARG KUBERNETES_VERSION=v1.36.4' package/Dockerfile
 grep -Fq 'ARG KUBERNETES_GIT_COMMIT=bb826b1d48562f110659e64e8ec444327433db95' package/Dockerfile
@@ -20,8 +20,9 @@ test "$(grep -Fc 'ARG GRPC_GO_VERSION=v1.83.2' package/Dockerfile)" -eq 2
 grep -Fq 'ARG CEL_GO_VERSION=v0.32.0' package/Dockerfile
 grep -Fq 'ARG ETCD_VERSION=v3.7.1' package/Dockerfile
 grep -Fq 'ARG ETCD_RAFT_VERSION=v3.7.0' package/Dockerfile
-test "$(grep -Fc 'ARG X_CRYPTO_VERSION=v0.56.0' package/Dockerfile)" -eq 2
-grep -Fq 'ARG X_SYS_VERSION=v0.47.0' package/Dockerfile
+test "$(grep -Fc 'ARG X_CRYPTO_VERSION=v0.57.0' package/Dockerfile)" -eq 2
+grep -Fq 'ARG X_SYS_VERSION=v0.48.0' package/Dockerfile
+grep -Fq 'ARG X_NET_VERSION=v0.60.0' package/Dockerfile
 grep -Fq 'ARG CNI_VERSION=v1.9.1' package/Dockerfile
 grep -Fq 'ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1' package/Dockerfile
 grep -Fq 'ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e' package/Dockerfile
@@ -29,8 +30,8 @@ grep -Fq 'io.pasturestack.cloud-provider="external-required"' package/Dockerfile
 grep -Fq 'io.pasturestack.legacy-rancher16-compatible="false"' package/Dockerfile
 grep -Fq 'io.pasturestack.runtime.base="scratch"' package/Dockerfile
 grep -Fq 'vulnerable_code_not_present' security/openvex.json
-grep -Fq 'expected_version=v1.36.4' scripts/release
-grep -Fq 'TAG: v1.36.4' .github/workflows/security-release-gate.yml
+grep -Fq 'expected_version=v1.36.5' scripts/release
+grep -Fq 'TAG: v1.36.5' .github/workflows/security-release-gate.yml
 
 active_paths=(package/Dockerfile scripts/package Makefile .github/workflows/security-release-gate.yml)
 if grep -n -i -E 'v?1\.12\.|helm[ -]?2|azure-cli|python.?cryptography|kube-dns|runc-1\.10|tiller-deploy|TILLER_' "${active_paths[@]}"; then
@@ -69,4 +70,4 @@ done
 
 test "$(find . -type f -not -path './.git/*' -not -path './dist/*' | wc -l)" -le 20
 git diff --check
-echo 'KUBERNETES_PACKAGE_VALIDATE_OK kubernetes=v1.36.4 cni=v1.9.1 compiler=go1.27.0 runtime=scratch legacy=removed'
+echo 'KUBERNETES_PACKAGE_VALIDATE_OK kubernetes=v1.36.4 cni=v1.9.1 compiler=go1.27.3 runtime=scratch legacy=removed'

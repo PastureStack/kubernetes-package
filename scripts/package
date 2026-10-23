@@ -19,8 +19,8 @@ GRPC_GO_VERSION=${GRPC_GO_VERSION:-v1.83.2}
 CEL_GO_VERSION=${CEL_GO_VERSION:-v0.32.0}
 ETCD_VERSION=${ETCD_VERSION:-v3.7.1}
 ETCD_RAFT_VERSION=${ETCD_RAFT_VERSION:-v3.7.0}
-X_CRYPTO_VERSION=${X_CRYPTO_VERSION:-v0.56.0}
-X_SYS_VERSION=${X_SYS_VERSION:-v0.47.0}
+X_CRYPTO_VERSION=${X_CRYPTO_VERSION:-v0.57.0}
+X_SYS_VERSION=${X_SYS_VERSION:-v0.48.0}
 CNI_VERSION=${CNI_VERSION:-v1.9.1}
 CNI_GIT_COMMIT=${CNI_GIT_COMMIT:-adc3e6b5b581638afbd194cf2e9319ecbb0151a1}
 CNI_GIT_TREE=${CNI_GIT_TREE:-91451a8931a305da27de4df81662ec08af58249e}
@@ -43,14 +43,15 @@ if ! [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}(-dirty)?$ ]]; then
     exit 1
 fi
 
-TAG=${TAG:-$KUBERNETES_VERSION}
+PACKAGE_VERSION=v1.36.5
+TAG=${TAG:-$PACKAGE_VERSION}
 IMAGE_NAME=${IMAGE_NAME:-pasturestack/kubernetes-package}
 if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "TAG must use numeric SemVer vMAJOR.MINOR.PATCH: $TAG" >&2
     exit 1
 fi
-if [ "$TAG" != "$KUBERNETES_VERSION" ]; then
-    echo "TAG must equal the packaged Kubernetes version: ${KUBERNETES_VERSION}" >&2
+if [ "$TAG" != "$PACKAGE_VERSION" ]; then
+    echo "TAG must equal the package wrapper version: ${PACKAGE_VERSION}" >&2
     exit 1
 fi
 if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
@@ -108,7 +109,7 @@ test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Lab
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.version"}}')" = "$CNI_VERSION"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.revision"}}')" = "$CNI_GIT_COMMIT"
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cni.tree"}}')" = "$CNI_GIT_TREE"
-test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.tools.compiler"}}')" = 'go1.27.0'
+test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.tools.compiler"}}')" = 'go1.27.3'
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.runtime.base"}}')" = 'scratch'
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.cloud-provider"}}')" = 'external-required'
 test "$("$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{index .Config.Labels "io.pasturestack.legacy-rancher16-compatible"}}')" = 'false'
@@ -161,9 +162,9 @@ cp security/openvex.json dist/openvex.json
 "$CONTAINER_ENGINE" rm "$container_id" >/dev/null
 container_id=
 trap - EXIT
-test "$(grep -hF ': go1.27.0' dist/kubernetes-buildinfo/*.txt | wc -l)" -eq 7
+test "$(grep -hF ': go1.27.3' dist/kubernetes-buildinfo/*.txt | wc -l)" -eq 7
 test "$(grep -hc 'openpgp-package-count=0' dist/kubernetes-buildinfo/OPENPGP-REACHABILITY.txt)" -eq 7
-grep -Fq '/out/loopback: go1.27.0' dist/CNI-LOOPBACK-BUILDINFO.txt
+grep -Fq '/out/loopback: go1.27.3' dist/CNI-LOOPBACK-BUILDINFO.txt
 printf '%s\n' "$IMAGE" > dist/images
 printf '%s\n' "$SOURCE_REVISION" > dist/source-revision.txt
 "$CONTAINER_ENGINE" image inspect "$IMAGE" --format '{{.Id}}' > dist/image-id.txt
@@ -179,4 +180,4 @@ sha256sum \
     dist/images dist/source-revision.txt dist/image-id.txt \
     | LC_ALL=C sort -k2 > dist/SHA256SUMS
 
-echo "KUBERNETES_PACKAGE_OK image=${IMAGE} kubernetes=${KUBERNETES_VERSION} cni=${CNI_VERSION} compiler=go1.27.0"
+echo "KUBERNETES_PACKAGE_OK image=${IMAGE} kubernetes=${KUBERNETES_VERSION} cni=${CNI_VERSION} compiler=go1.27.3"

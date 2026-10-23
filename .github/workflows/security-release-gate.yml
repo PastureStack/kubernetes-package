@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 120
     env:
       IMAGE_NAME: pasturestack/kubernetes-package
-      TAG: v1.36.4
+      TAG: v1.36.5
       TRIVY_VERSION: 0.74.0
       TRIVY_ARCHIVE_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
     steps:

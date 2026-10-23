@@ -7,7 +7,7 @@ Only the Kubernetes `v1.36.4` component bundle and CNI loopback `v1.9.1` payload
 ## Supply-chain requirements
 
 - Build Kubernetes from the official `v1.36.4` source archive and verify both its SHA-256 and upstream license before compilation.
-- Bind Kubernetes version metadata to upstream commit `bb826b1d48562f110659e64e8ec444327433db95` and compile every shipped Go binary with Go `1.27.0`.
+- Bind Kubernetes version metadata to upstream commit `bb826b1d48562f110659e64e8ec444327433db95` and compile every shipped Go binary with Go `1.27.3`.
 - Migrate the former GitHub CEL import path to its current `cel.dev/cel-go` module, upgrade the source graph to the recorded current CEL-Go, etcd, OpenTelemetry, gRPC-Go, `x/crypto`, and `x/sys` versions, then regenerate it through the public Go module proxy and checksum database.
 - Build CNI loopback from official plug-ins `v1.9.1`, verify the exact tag commit, Git tree and license SHA-256, and update its `x/sys` graph through the same authenticated module path before compiling offline from vendor.
 - Build every shipped executable statically and use a `scratch` runtime. No package manager, shell, general-purpose utility suite, or mutable runtime base is permitted.

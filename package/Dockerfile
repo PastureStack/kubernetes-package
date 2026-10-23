@@ -1,4 +1,4 @@
-FROM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS kubernetes-builder
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS kubernetes-builder
 
 ARG KUBERNETES_VERSION=v1.36.4
 ARG KUBERNETES_GIT_COMMIT=bb826b1d48562f110659e64e8ec444327433db95
@@ -10,12 +10,24 @@ ARG GRPC_GO_VERSION=v1.83.2
 ARG CEL_GO_VERSION=v0.32.0
 ARG ETCD_VERSION=v3.7.1
 ARG ETCD_RAFT_VERSION=v3.7.0
-ARG X_CRYPTO_VERSION=v0.56.0
-ARG X_SYS_VERSION=v0.47.0
+ARG X_CRYPTO_VERSION=v0.57.0
+ARG X_NET_VERSION=v0.60.0
+ARG X_SYS_VERSION=v0.48.0
 ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
+ADD --checksum=sha256:5b6326f1932cfd7be57130561dc78192f09ed9f58bfbe6606ed0c50510c3b6cd https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260816ubuntu0.26.04.1_all.deb /tmp/pasturestack-ca-certificates.deb
 RUN set -eux; \
-    test "$(go version)" = "go version go1.27.0 linux/amd64"; \
+    mkdir -p /out /tmp/pasturestack-trust; \
+    test "$(dpkg-deb -f /tmp/pasturestack-ca-certificates.deb Version)" = 20260816ubuntu0.26.04.1; \
+    dpkg-deb -x /tmp/pasturestack-ca-certificates.deb /tmp/pasturestack-trust; \
+    test ! -e /tmp/pasturestack-trust/usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt; \
+    find /tmp/pasturestack-trust/usr/share/ca-certificates -type f -name '*.crt' | LC_ALL=C sort | \
+        while IFS= read -r certificate; do sed -e '$a\' "$certificate"; done > /out/ca-certificates.crt; \
+    test -s /out/ca-certificates.crt; \
+    rm -rf /tmp/pasturestack-trust /tmp/pasturestack-ca-certificates.deb
+
+RUN set -eux; \
+    test "$(go version)" = "go version go1.27.3 linux/amd64"; \
     mkdir -p /src/kubernetes /out/buildinfo; \
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
         --output /tmp/kubernetes-source.tar.gz "https://dl.k8s.io/${KUBERNETES_VERSION}/kubernetes-src.tar.gz"; \
@@ -47,6 +59,7 @@ RUN set -eux; \
         "go.etcd.io/etcd/etcdutl/v3@${ETCD_VERSION}" \
         "go.etcd.io/raft/v3@${ETCD_RAFT_VERSION}" \
         "golang.org/x/crypto@${X_CRYPTO_VERSION}" \
+        "golang.org/x/net@${X_NET_VERSION}" \
         "golang.org/x/sys@${X_SYS_VERSION}"; \
     GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod tidy; \
     GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod vendor; \
@@ -57,6 +70,7 @@ RUN set -eux; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' go.etcd.io/etcd/client/pkg/v3)" = "${ETCD_VERSION}"; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' go.etcd.io/raft/v3)" = "${ETCD_RAFT_VERSION}"; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/crypto)" = "${X_CRYPTO_VERSION}"; \
+    test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/net)" = "${X_NET_VERSION}"; \
     test "$(GOWORK=off go list -m -f '{{.Version}}' golang.org/x/sys)" = "${X_SYS_VERSION}"; \
     : > /out/buildinfo/OPENPGP-REACHABILITY.txt; \
     for package in cmd/kubeadm cmd/kubelet cmd/kube-proxy cmd/kube-apiserver cmd/kube-controller-manager cmd/kube-scheduler cmd/kubectl; do \
@@ -66,7 +80,7 @@ RUN set -eux; \
         fi; \
         printf '%s openpgp-package-count=0\n' "${package}" >> /out/buildinfo/OPENPGP-REACHABILITY.txt; \
     done; \
-    CGO_ENABLED=0 GO_VERSION=1.27.0 FORCE_HOST_GO=1 KUBE_BUILD_PLATFORMS=linux/amd64 \
+    CGO_ENABLED=0 GO_VERSION=1.27.3 FORCE_HOST_GO=1 KUBE_BUILD_PLATFORMS=linux/amd64 \
         KUBE_GIT_VERSION="${KUBERNETES_VERSION}" KUBE_GIT_COMMIT="${KUBERNETES_GIT_COMMIT}" \
         KUBE_GIT_TREE_STATE=clean KUBE_GIT_MAJOR=1 KUBE_GIT_MINOR=36 \
         ./hack/make-rules/build.sh \
@@ -75,7 +89,7 @@ RUN set -eux; \
     for binary in kubeadm kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler kubectl; do \
         install -m 0555 "_output/local/go/bin/${binary}" "/out/${binary}"; \
         go version -m "/out/${binary}" > "/out/buildinfo/${binary}.txt"; \
-        grep -Fq "/out/${binary}: go1.27.0" "/out/buildinfo/${binary}.txt"; \
+        grep -Fq "/out/${binary}: go1.27.3" "/out/buildinfo/${binary}.txt"; \
     done; \
     test "$(/out/kubeadm version -o short)" = "${KUBERNETES_VERSION}"; \
     for binary in kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler; do \
@@ -85,17 +99,17 @@ RUN set -eux; \
     install -m 0444 LICENSE /out/KUBERNETES-LICENSE; \
     rm -rf /src/kubernetes /root/.cache/go-build /tmp/go-build*
 
-FROM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS cni-builder
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS cni-builder
 
 ARG CNI_VERSION=v1.9.1
 ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
 ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e
 ARG CNI_LICENSE_SHA256=b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1
-ARG X_SYS_VERSION=v0.47.0
+ARG X_SYS_VERSION=v0.48.0
 ENV GOMAXPROCS=2 GOTELEMETRY=off GOTOOLCHAIN=local
 
 RUN set -eux; \
-    test "$(go version)" = "go version go1.27.0 linux/amd64"; \
+    test "$(go version)" = "go version go1.27.3 linux/amd64"; \
     mkdir -p /out; \
     git init -q /src/cni; \
     cd /src/cni; \
@@ -115,7 +129,7 @@ RUN set -eux; \
     /out/loopback 2>&1 | grep -Fq "CNI loopback plugin ${CNI_VERSION}"; \
     CNI_COMMAND=VERSION /out/loopback | grep -Fq '"supportedVersions"'; \
     go version -m /out/loopback > /out/CNI-LOOPBACK-BUILDINFO.txt; \
-    grep -Fq '/out/loopback: go1.27.0' /out/CNI-LOOPBACK-BUILDINFO.txt; \
+    grep -Fq '/out/loopback: go1.27.3' /out/CNI-LOOPBACK-BUILDINFO.txt; \
     install -m 0444 LICENSE /out/CNI-LICENSE; \
     chmod 0555 /out/loopback; \
     rm -rf /src/cni /root/.cache/go-build /tmp/go-build*
@@ -133,13 +147,14 @@ ARG GRPC_GO_VERSION=v1.83.2
 ARG CEL_GO_VERSION=v0.32.0
 ARG ETCD_VERSION=v3.7.1
 ARG ETCD_RAFT_VERSION=v3.7.0
-ARG X_CRYPTO_VERSION=v0.56.0
-ARG X_SYS_VERSION=v0.47.0
+ARG X_CRYPTO_VERSION=v0.57.0
+ARG X_NET_VERSION=v0.60.0
+ARG X_SYS_VERSION=v0.48.0
 ARG CNI_VERSION=v1.9.1
 ARG CNI_GIT_COMMIT=adc3e6b5b581638afbd194cf2e9319ecbb0151a1
 ARG CNI_GIT_TREE=91451a8931a305da27de4df81662ec08af58249e
 
-COPY --from=kubernetes-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=kubernetes-builder /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=kubernetes-builder \
     /out/kubeadm /out/kubelet /out/kube-proxy /out/kube-apiserver \
     /out/kube-controller-manager /out/kube-scheduler /out/kubectl /usr/bin/
@@ -169,11 +184,12 @@ LABEL org.opencontainers.image.source="https://github.com/PastureStack/kubernete
       io.pasturestack.dependencies.etcd="${ETCD_VERSION}" \
       io.pasturestack.dependencies.etcd-raft="${ETCD_RAFT_VERSION}" \
       io.pasturestack.dependencies.x-crypto="${X_CRYPTO_VERSION}" \
+      io.pasturestack.dependencies.x-net="${X_NET_VERSION}" \
       io.pasturestack.dependencies.x-sys="${X_SYS_VERSION}" \
       io.pasturestack.cni.version="${CNI_VERSION}" \
       io.pasturestack.cni.revision="${CNI_GIT_COMMIT}" \
       io.pasturestack.cni.tree="${CNI_GIT_TREE}" \
-      io.pasturestack.tools.compiler="go1.27.0" \
+      io.pasturestack.tools.compiler="go1.27.3" \
       io.pasturestack.runtime.base="scratch" \
       io.pasturestack.cloud-provider="external-required" \
       io.pasturestack.legacy-rancher16-compatible="false"

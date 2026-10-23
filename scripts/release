@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 
-expected_version=v1.36.4
+expected_version=v1.36.5
 if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
     echo 'Release builds require a clean worktree' >&2
     exit 1
@@ -19,7 +19,7 @@ fi
 
 release_tag=${release_tags[0]}
 if [ "$release_tag" != "$expected_version" ]; then
-    echo "Release tag must equal the packaged Kubernetes version: ${expected_version}" >&2
+    echo "Release tag must equal the package wrapper version: ${expected_version}" >&2
     exit 1
 fi
 if [ "$(git cat-file -t "refs/tags/${release_tag}")" != tag ]; then

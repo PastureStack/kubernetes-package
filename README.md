@@ -6,7 +6,7 @@ PastureStack is an independent community project and is not affiliated with or e
 
 The retired compatibility package remains available only as immutable
 historical evidence. The maintained component bundle uses the pure numeric
-coordinate `v1.36.4`; product identity and provenance are carried by the
+wrapper coordinate `v1.36.5` with Kubernetes `v1.36.4`; product identity and provenance are carried by the
 package name, labels, SBOM, and attestations rather than a text qualifier in
 the tag. This component image is still not an in-place upgrade path for a
 legacy Rancher 1.6 cluster.
@@ -14,8 +14,8 @@ legacy Rancher 1.6 cluster.
 ## Current payload
 
 - Kubernetes `v1.36.4`, exact upstream commit `bb826b1d48562f110659e64e8ec444327433db95`.
-- `kubeadm`, `kubelet`, `kube-proxy`, `kube-apiserver`, `kube-controller-manager`, `kube-scheduler`, and `kubectl` built from that source with Go `1.27.0`.
-- CNI plug-ins `v1.9.1` loopback binary built from the vendored upstream source with Go `1.27.0`.
+- `kubeadm`, `kubelet`, `kube-proxy`, `kube-apiserver`, `kube-controller-manager`, `kube-scheduler`, and `kubectl` built from that source with Go `1.27.3`.
+- CNI plug-ins `v1.9.1` loopback binary built from the vendored upstream source with Go `1.27.3`.
 - Current dependency overrides: OpenTelemetry `v1.45.0`, OpenTelemetry gRPC instrumentation `v0.70.0`, gRPC-Go `v1.83.2`, `cel.dev/cel-go` `v0.32.0`, etcd `v3.7.1`, `go.etcd.io/raft/v3` `v3.7.0`, `x/crypto` `v0.56.0`, and `x/sys` `v0.47.0`.
 - Statically linked component binaries in a `scratch` runtime with only the required CA bundle, licenses, and build evidence.
 
@@ -54,3 +54,11 @@ SOURCE_REVISION=$(git rev-parse HEAD) TAG=v1.36.4 bash scripts/package
 ```
 
 `scripts/package` builds the exact image, checks every packaged binary and label, compiles the CNI loopback test suite and exercises its unprivileged `VERSION` protocol, confirms the minimal root filesystem, scans every vulnerability severity and secrets, and emits raw plus VEX-aware Trivy JSON, a vulnerability-enriched CycloneDX SBOM, the rootfs inventory, and immutable evidence under `dist/`. The sole VEX statement is accepted only after the source package graph proves that all seven commands exclude the discontinued `x/crypto/openpgp` package. CNI `ADD`/`CHECK`/`DEL` tests require a privileged network namespace and belong to the target-node integration scope in `COMPATIBILITY.md`, not to a rootless image build.
+
+## October 2026 security maintenance
+
+The Kubernetes source build selects `golang.org/x/net v0.60.0` and its required `golang.org/x/sys v0.48.0`. This is a wrapper security rebuild; the upstream Kubernetes version remains `v1.36.4`.
+
+The wrapper release is `v1.36.5`; its Kubernetes source and binary version remain `v1.36.4`. This is a security rebuild of the wrapper, not an upstream Kubernetes version upgrade.
+
+Maintained Go builds select the patched Go 1.27.3 compiler without raising the existing Go language requirement. Release artifacts must pass the repository's existing checks before publication.
