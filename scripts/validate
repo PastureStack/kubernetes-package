@@ -29,8 +29,8 @@ grep -Fq 'io.pasturestack.cloud-provider="external-required"' package/Dockerfile
 grep -Fq 'io.pasturestack.legacy-rancher16-compatible="false"' package/Dockerfile
 grep -Fq 'io.pasturestack.runtime.base="scratch"' package/Dockerfile
 grep -Fq 'vulnerable_code_not_present' security/openvex.json
-grep -Fq 'expected_version=v1.36.4' scripts/release
-grep -Fq 'TAG: v1.36.4' .github/workflows/security-release-gate.yml
+grep -Fq 'expected_version=v1.36.5' scripts/release
+grep -Fq 'TAG: v1.36.5' .github/workflows/security-release-gate.yml
 
 active_paths=(package/Dockerfile scripts/package Makefile .github/workflows/security-release-gate.yml)
 if grep -n -i -E 'v?1\.12\.|helm[ -]?2|azure-cli|python.?cryptography|kube-dns|runc-1\.10|tiller-deploy|TILLER_' "${active_paths[@]}"; then

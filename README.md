@@ -6,7 +6,7 @@ PastureStack is an independent community project and is not affiliated with or e
 
 The retired compatibility package remains available only as immutable
 historical evidence. The maintained component bundle uses the pure numeric
-coordinate `v1.36.4`; product identity and provenance are carried by the
+wrapper coordinate `v1.36.5` with Kubernetes `v1.36.4`; product identity and provenance are carried by the
 package name, labels, SBOM, and attestations rather than a text qualifier in
 the tag. This component image is still not an in-place upgrade path for a
 legacy Rancher 1.6 cluster.

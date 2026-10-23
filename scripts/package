@@ -43,14 +43,15 @@ if ! [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}(-dirty)?$ ]]; then
     exit 1
 fi
 
-TAG=${TAG:-$KUBERNETES_VERSION}
+PACKAGE_VERSION=v1.36.5
+TAG=${TAG:-$PACKAGE_VERSION}
 IMAGE_NAME=${IMAGE_NAME:-pasturestack/kubernetes-package}
 if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "TAG must use numeric SemVer vMAJOR.MINOR.PATCH: $TAG" >&2
     exit 1
 fi
-if [ "$TAG" != "$KUBERNETES_VERSION" ]; then
-    echo "TAG must equal the packaged Kubernetes version: ${KUBERNETES_VERSION}" >&2
+if [ "$TAG" != "$PACKAGE_VERSION" ]; then
+    echo "TAG must equal the package wrapper version: ${PACKAGE_VERSION}" >&2
     exit 1
 fi
 if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
